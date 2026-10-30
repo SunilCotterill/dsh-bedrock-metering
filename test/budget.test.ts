@@ -1,0 +1,161 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import {
+  Announcer, calendarEnd, calendarStart, evaluate, formatUsd, stopText, summarize, warningText,
+} from '../src/budget.ts';
+import type { BudgetConfig } from '../src/budget.ts';
+import type { HeldRow, LedgerRow } from '../src/ledger.ts';
+
+const local = (y: number, m: number, d: number, h = 0, min = 0) => new Date(y, m - 1, d, h, min).getTime();
+const daily: BudgetConfig = { window: 'day', limitUsd: 50, warnAt: [0.8, 0.95], stopAt: 1 };
+
+let attempt = 0;
+function usage(at: number, usd: number, extra: Partial<LedgerRow> = {}): HeldRow {
+  return {
+    at,
+    row: {
+      v: 1, kind: 'usage', ts: new Date(at).toISOString(), home: '/h', profile: 'web', attempt: `a${++attempt}`,
+      provider: 'amazon-bedrock', model: 'global.moonshotai.kimi-k3', in: 10, out: 5, cacheRead: 2, cacheWrite: 0, reasoning: 0,
+      usd, metered: true, priced: true, ...extra,
+    } as LedgerRow,
+  };
+}
+function control(at: number, row: Partial<LedgerRow>): HeldRow {
+  return { at, row: { v: 1, ts: new Date(at).toISOString(), home: '/h', profile: 'web', ...row } as LedgerRow };
+}
+
+describe('windows', () => {
+  it('starts a day at local midnight and ends at the next one', () => {
+    const now = local(2026, 10, 28, 17, 55);
+    assert.equal(calendarStart('day', now), local(2026, 10, 28));
+    assert.equal(calendarEnd('day', now), local(2026, 10, 29));
+  });
+
+  it('starts a month on the 1st, local time, across a year end', () => {
+    assert.equal(calendarStart('month', local(2026, 12, 31, 23, 59)), local(2026, 12, 1));
+    assert.equal(calendarEnd('month', local(2026, 12, 31, 23, 59)), local(2027, 1, 1));
+  });
+
+  it('sums only rows inside the current day', () => {
+    const now = local(2026, 10, 28, 12);
+    const rows = [usage(local(2026, 10, 27, 23, 59), 100), usage(local(2026, 10, 28, 0, 0), 1.5), usage(local(2026, 10, 28, 11), 2.25)];
+    const summary = summarize(rows, 'day', now);
+    assert.equal(summary.spentUsd, 3.75);
+    assert.equal(summary.start, local(2026, 10, 28));
+    assert.equal(summary.end, local(2026, 10, 29));
+  });
+
+  it('ignores rows stamped after now (clock skew between processes)', () => {
+    const now = local(2026, 10, 28, 12);
+    assert.equal(summarize([usage(local(2026, 10, 28, 13), 9)], 'day', now).spentUsd, 0);
+  });
+
+  it('moves the window start forward on /budget reset', () => {
+    const now = local(2026, 10, 28, 12);
+    const rows = [usage(local(2026, 10, 28, 9), 40), control(local(2026, 10, 28, 10), { kind: 'reset' }), usage(local(2026, 10, 28, 11), 1)];
+    const summary = summarize(rows, 'day', now);
+    assert.equal(summary.spentUsd, 1);
+    assert.equal(summary.start, local(2026, 10, 28, 10));
+  });
+
+  it('scopes a session window to one session', () => {
+    const now = local(2026, 10, 28, 12);
+    const rows = [usage(now - 1000, 2, { session: 's1' }), usage(now - 500, 3, { session: 's2' })];
+    assert.equal(summarize(rows, 'session', now, 's1').spentUsd, 2);
+    assert.equal(summarize(rows, 'session', now).spentUsd, 0);
+  });
+
+  it('keeps token counts per route, including unmetered routes at $0', () => {
+    const now = local(2026, 10, 28, 12);
+    const rows = [
+      usage(now - 3, 0.5),
+      usage(now - 2, 0.25),
+      usage(now - 1, 0, { provider: 'local-deepseek', model: 'deepseek-v4-flash', metered: false, priced: false }),
+      usage(now, 0, { model: 'mystery', priced: false }),
+    ];
+    const summary = summarize(rows, 'day', now);
+    assert.equal(summary.routes[0]?.calls, 2);
+    assert.equal(summary.routes[0]?.in, 20);
+    assert.equal(summary.routes.length, 3);
+    assert.equal(summary.unpricedCalls, 1);
+  });
+});
+
+describe('thresholds', () => {
+  const at = local(2026, 10, 28, 12);
+  const verdictFor = (usd: number, config = daily, rows: HeldRow[] = []) => {
+    const summary = summarize([usage(at - 1, usd), ...rows], config.window, at);
+    return { summary, verdict: evaluate(summary, config, at) };
+  };
+
+  it('warns at 80% and 95% and stops at 100%', () => {
+    assert.equal(verdictFor(39.99).verdict.warnLevel, undefined);
+    assert.equal(verdictFor(40).verdict.warnLevel, 0.8);
+    assert.equal(verdictFor(47.5).verdict.warnLevel, 0.95);
+    assert.equal(verdictFor(49.99).verdict.stop, false);
+    assert.equal(verdictFor(50).verdict.stop, true);
+  });
+
+  it('treats any spend over a zero limit as over the limit', () => {
+    const { verdict } = verdictFor(0.0001, { ...daily, limitUsd: 0 });
+    assert.equal(verdict.fraction, Number.POSITIVE_INFINITY);
+    assert.equal(verdict.stop, true);
+  });
+
+  it('warns immediately with warnAt [0]', () => {
+    const summary = summarize([], 'day', at);
+    assert.equal(evaluate(summary, { ...daily, warnAt: [0] }, at).warnLevel, 0);
+  });
+
+  it('lifts the stop while an override is active, even one set before midnight', () => {
+    const until = new Date(at + 30 * 60_000).toISOString();
+    const override = control(local(2026, 10, 27, 23, 50), { kind: 'override', until, minutes: 30 } as Partial<LedgerRow>);
+    const active = verdictFor(60, daily, [override]).verdict;
+    assert.equal(active.overLimit, true);
+    assert.equal(active.overridden, true);
+    assert.equal(active.stop, false);
+    const later = at + 31 * 60_000;
+    const summary = summarize([usage(at - 1, 60), override], 'day', later);
+    assert.equal(evaluate(summary, daily, later).stop, true);
+  });
+});
+
+describe('Announcer', () => {
+  it('announces each newly crossed threshold once per window', () => {
+    const announcer = new Announcer();
+    const at = local(2026, 10, 28, 12);
+    const step = (usd: number, now = at) => {
+      const summary = summarize([usage(now - 1, usd)], 'day', now);
+      return announcer.next(summary, evaluate(summary, daily, now));
+    };
+    assert.equal(step(10), undefined);
+    assert.equal(step(41), 0.8);
+    assert.equal(step(42), undefined);
+    assert.equal(step(48), 0.95);
+    assert.equal(step(49), undefined);
+    assert.equal(step(41, local(2026, 10, 29, 9)), 0.8);
+  });
+});
+
+describe('messages', () => {
+  it('formats the plan warning line', () => {
+    const at = local(2026, 10, 28, 12);
+    const summary = summarize([usage(at - 1, 41.1)], 'day', at);
+    assert.equal(warningText(summary, evaluate(summary, daily, at), daily), '82% of $50.00 daily limit used ($41.10)');
+  });
+
+  it('names the reset time and the ways out when stopped', () => {
+    const at = local(2026, 10, 28, 12);
+    const text = stopText(summarize([usage(at - 1, 50.12)], 'day', at), daily);
+    assert.match(text, /^stopped: \$50\.12 of \$50\.00 daily Bedrock budget used; the window resets at 2026-10-29 00:00 local time\./);
+    assert.match(text, /\/budget override <minutes>/);
+  });
+
+  it('keeps tiny amounts readable', () => {
+    assert.equal(formatUsd(0), '$0.00');
+    assert.equal(formatUsd(0.001), '$0.001');
+    assert.equal(formatUsd(0.045), '$0.045');
+    assert.equal(formatUsd(0.5), '$0.50');
+    assert.equal(formatUsd(12.345), '$12.35');
+  });
+});

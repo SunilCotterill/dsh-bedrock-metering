@@ -1,0 +1,289 @@
+#!/usr/bin/env node
+// Refresh prices/bedrock.json from the published Amazon Bedrock on-demand rates.
+//
+// The pricing page (https://aws.amazon.com/bedrock/pricing/) renders most
+// tables server-side; a few (DeepSeek-R1, DeepSeek-V3.1) are client-rendered
+// from `{priceOf!<path>!<rate hash>!<region>!<multiplier>}` tokens resolved
+// against the public feed at
+// https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/<service>/USD/current/<name>.json.
+// Each bundled row names the page cell it came from in its `page` field
+// (section, tab panel, row name, region); the script finds that cell, diffs
+// the rates, and rewrites the file only with --write. No AWS credentials are used.
+//
+// usage: scripts/refresh-prices [--write] [--file <prices.json>] [--html <saved page>] [--feed <saved bedrock feed json>]
+
+import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const PAGE_URL = 'https://aws.amazon.com/bedrock/pricing/';
+const DEFAULT_FEED_ENDPOINT = 'https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps';
+const FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite'];
+
+function parseArgs(argv) {
+  const args = { write: false, file: fileURLToPath(new URL('../prices/bedrock.json', import.meta.url)) };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--write') args.write = true;
+    else if (arg === '--file' || arg === '--html' || arg === '--feed') args[arg.slice(2)] = argv[++i];
+    else if (arg === '-h' || arg === '--help') {
+      console.log('usage: scripts/refresh-prices [--write] [--file <prices.json>] [--html <saved page>] [--feed <saved feed json>]');
+      process.exit(0);
+    } else throw new Error(`unknown argument ${JSON.stringify(arg)}`);
+  }
+  return args;
+}
+
+async function fetchText(url) {
+  const response = await fetch(url, { headers: { 'user-agent': 'dsh-bedrock-metering refresh-prices' } });
+  if (!response.ok) throw new Error(`GET ${url}: HTTP ${response.status}`);
+  return response.text();
+}
+
+function decodeEntities(text) {
+  return text
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Flatten the page into marker lines: `[H] heading`, `[PANEL]`, `[TABLE]`,
+ * `[TR]`, ` | cell`, `[/TABLE]`, and plain text lines (tab labels, region notes).
+ */
+function flatten(html) {
+  return decodeEntities(html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<tr[^>]*>/gi, '\n[TR] ')
+    .replace(/<t[dh][^>]*>/gi, ' | ')
+    .replace(/<table[^>]*>/gi, '\n[TABLE]\n')
+    .replace(/<\/table>/gi, '\n[/TABLE]\n')
+    .replace(/<h[1-6][^>]*>/gi, '\n[H] ')
+    .replace(/<\/h[1-6]>/gi, '\n')
+    .replace(/<li[^>]*role="tabpanel"[^>]*>/gi, '\n[PANEL]\n')
+    .replace(/<(p|div|li|br)[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' '))
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+/** Walk the marker lines into tables tagged with section, tab panel and region note. */
+function parseTables(lines) {
+  const tables = [];
+  let section = '';
+  let panel = '';
+  let region = '';
+  let lastText = '';
+  let table;
+  for (const line of lines) {
+    if (table !== undefined) {
+      if (line === '[/TABLE]') {
+        tables.push(table);
+        table = undefined;
+      } else if (line.startsWith('[TR]')) {
+        table.rows.push(cells(line.slice(4)));
+      } else if (line.startsWith('|') && table.rows.length > 0) {
+        table.rows.at(-1).push(...cells(line));
+      }
+      continue;
+    }
+    if (line.startsWith('[H] ')) {
+      const heading = line.slice(4).trim();
+      // Sub-headings such as "On-Demand pricing" or "Standard tier pricing" stay inside their provider section.
+      if (!/pricing$/i.test(heading)) {
+        section = heading;
+        panel = '';
+        region = '';
+      }
+    } else if (line === '[PANEL]') {
+      panel = lastText;
+      region = '';
+    } else if (line === '[TABLE]') {
+      table = { section, panel, region, rows: [] };
+    } else if (/^Regions?:/i.test(line)) {
+      region = line.replace(/^Regions?:\s*/i, '');
+    } else if (line.includes('{regionSelector}')) {
+      region = '{regionSelector}';
+    } else if (!line.startsWith('[')) {
+      lastText = line;
+    }
+  }
+  return tables;
+}
+
+function cells(text) {
+  return text.split('|').map((cell) => cell.trim()).filter((cell, index, all) => cell !== '' || (index > 0 && index < all.length - 1));
+}
+
+const columnOf = (header) => {
+  const text = header.toLowerCase();
+  if (text.includes('cache read')) return 'cacheRead';
+  if (text.includes('cache write')) return 'cacheWrite';
+  if (text.includes('input')) return 'input';
+  if (text.includes('output')) return 'output';
+  return undefined;
+};
+
+/** Expand each table into named page rows with raw cells per field. */
+function pageRows(tables) {
+  const rows = [];
+  for (const table of tables) {
+    const nonEmpty = table.rows.filter((row) => row.some((cell) => cell !== ''));
+    const [header, ...body] = nonEmpty;
+    if (header === undefined) continue;
+    const columns = header.map(columnOf);
+    if (!columns.includes('input')) continue;
+    for (const row of body) {
+      const raw = {};
+      columns.forEach((field, index) => {
+        if (field !== undefined && row[index] !== undefined) raw[field] = row[index];
+      });
+      rows.push({ section: table.section, panel: table.panel, region: table.region, name: row[0] ?? '', raw });
+    }
+  }
+  return rows;
+}
+
+const TOKEN = /^\{priceOf!([^!]+)!([^!]+)!([^!]+)!(\d+(?:\.\d+)?)(?:!opt)?\}$/;
+
+/** Feed paths the client-rendered cells reference, e.g. `bedrock/bedrock`. */
+function feedPaths(rows) {
+  const paths = new Set();
+  for (const row of rows) for (const value of Object.values(row.raw)) {
+    const match = TOKEN.exec(value);
+    if (match) paths.add(match[1]);
+  }
+  return paths;
+}
+
+function feedUrl(endpoint, path) {
+  const [service, name = service] = path.split('/');
+  return `${endpoint}/${service}/USD/current/${name}.json`;
+}
+
+/** Resolve one cell to USD per 1M tokens, or null when the page shows no price. */
+function resolveCell(value, region, feeds) {
+  if (value === undefined) return null;
+  const token = TOKEN.exec(value);
+  if (token) {
+    const [, path, hash, cellRegion, multiplier] = token;
+    const feed = feeds.get(path);
+    const feedRegion = cellRegion === '*' ? region : cellRegion;
+    const entry = feed?.regions?.[feedRegion]?.[hash];
+    if (entry === undefined) return undefined;
+    return round(Number(entry.price) * Number(multiplier));
+  }
+  const number = /\$\s*([\d,]+(?:\.\d+)?)/.exec(value);
+  return number ? round(Number(number[1].replace(/,/g, ''))) : null;
+}
+
+function round(value) {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+/** Find the page cell a bundled row names and read its rates. */
+function locate(spec, rows, feeds) {
+  const candidates = rows.filter((row) => row.section === spec.section && row.panel === spec.panel && row.name === spec.row);
+  for (const row of candidates) {
+    // Client-rendered cells carry feed tokens and take their region from the spec instead of a page note.
+    const dynamic = Object.values(row.raw).some((value) => TOKEN.test(value));
+    if (spec.region === undefined ? dynamic || row.region !== '' : !dynamic && !row.region.includes(spec.region)) continue;
+    const region = spec.region ?? '';
+    const rates = {};
+    let resolved = true;
+    for (const field of FIELDS) {
+      const value = resolveCell(row.raw[field], region, feeds);
+      if (value === undefined) resolved = false;
+      rates[field] = value ?? null;
+    }
+    if (resolved && rates.input !== null && rates.output !== null) return { rates, dynamic };
+  }
+  return undefined;
+}
+
+const usd = (value) => (value === null ? 'n/a' : String(value));
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const table = JSON.parse(readFileSync(args.file, 'utf8'));
+  const html = args.html ? readFileSync(args.html, 'utf8') : await fetchText(PAGE_URL);
+  const rows = pageRows(parseTables(flatten(html)));
+  if (rows.length === 0) throw new Error('no price tables found on the page; its layout may have changed');
+
+  // Fetch only the feeds that cells in the bundled rows' tab panels reference.
+  const watched = new Set(table.rows.map((row) => row.page && `${row.page.section}\u0000${row.page.panel}`).filter(Boolean));
+  const endpoint = /data-pricing-endpoint="([^"]+)"/.exec(html)?.[1] ?? DEFAULT_FEED_ENDPOINT;
+  const feeds = new Map();
+  for (const path of feedPaths(rows.filter((row) => watched.has(`${row.section}\u0000${row.panel}`)))) {
+    try {
+      const text = args.feed ? readFileSync(args.feed, 'utf8') : await fetchText(feedUrl(endpoint, path));
+      feeds.set(path, JSON.parse(text));
+    } catch (error) {
+      console.warn(`refresh-prices: feed ${path} unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const changes = [];
+  const missing = [];
+  for (const row of table.rows) {
+    if (row.page === undefined) continue;
+    const found = locate(row.page, rows, feeds);
+    if (found === undefined) {
+      missing.push(row.key);
+      continue;
+    }
+    for (const field of FIELDS) {
+      const before = row[field] ?? null;
+      const after = found.rates[field];
+      if (before !== after) changes.push({ key: row.key, field, before, after });
+    }
+    row.next = found.rates;
+  }
+
+  const named = new Set(table.rows.map((row) => row.page && `${row.page.section}\u0000${row.page.panel}\u0000${row.page.row}`).filter(Boolean));
+  const unmapped = [...new Set(rows
+    .filter((row) => watched.has(`${row.section}\u0000${row.panel}`) && !named.has(`${row.section}\u0000${row.panel}\u0000${row.name}`))
+    .map((row) => `${row.section} / ${row.panel} / ${row.name}`))];
+
+  console.log(`Fetched ${args.html ?? PAGE_URL}: ${rows.length} priced rows; ${feeds.size} feed(s) for client-rendered cells.`);
+  console.log(`Matched ${table.rows.length - missing.length} of ${table.rows.length} bundled rows.`);
+  if (changes.length === 0) console.log('No rate changes against the bundled table.');
+  else {
+    console.log('Rate changes (USD per 1M tokens):');
+    for (const change of changes) console.log(`  ${change.key} ${change.field}: ${usd(change.before)} -> ${usd(change.after)}`);
+  }
+  if (missing.length > 0) console.log(`Not found on the page (layout or catalog changed): ${missing.join(', ')}`);
+  if (unmapped.length > 0) console.log(`On the page but not bundled, in watched sections: ${unmapped.join('; ')}`);
+
+  console.log('\n| Model IDs | Page name | Region | Input | Output | Cache read | Cache write |\n|---|---|---|---|---|---|---|');
+  for (const row of table.rows) {
+    const rates = row.next ?? row;
+    console.log(`| ${row.modelIds.map((id) => `\`${id}\``).join(' / ')} | ${row.name} | ${row.region} | ${usd(rates.input)} | ${usd(rates.output)} | ${usd(rates.cacheRead ?? null)} | ${usd(rates.cacheWrite ?? null)} |`);
+  }
+
+  if (args.write) {
+    for (const row of table.rows) {
+      if (row.next === undefined) continue;
+      for (const field of FIELDS) row[field] = row.next[field];
+      row.retrievedAt = today;
+      delete row.next;
+    }
+    table.retrievedAt = today;
+    writeFileSync(args.file, JSON.stringify(table, null, 2) + '\n');
+    console.log(`\nWrote ${args.file} (retrievedAt ${today}). Rows stay verified: false until checked against an AWS bill.`);
+  } else if (changes.length > 0) {
+    console.log('\nRun with --write to update the file.');
+  }
+  if (missing.length > 0) process.exitCode = 1;
+}
+
+main().catch((error) => {
+  console.error(`refresh-prices: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+});

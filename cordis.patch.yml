@@ -1,0 +1,24 @@
+# dsh-bedrock-metering bundle patch: one inserted row with the plugin's defaults.
+# Override in a profile's cordis.patch.yml under `- id: bedrock-metering` with a
+# complete `config:` block (a patch replaces the whole config).
+
+- insert:
+    - id: bedrock-metering
+      name: dsh-bedrock-metering
+      config:
+        ledgerPath: ~/.dsh-bedrock-metering/ledger.jsonl
+        budget:
+          window: day
+          limitUsd: 50
+          warnAt: [0.8, 0.95]
+          stopAt: 1
+        meter:
+          providers: [amazon-bedrock]
+          region: us
+          unpricedModel: warn-zero
+          cacheFallback: input-rate
+          notifyModel: false
+        override:
+          allow: true
+          maxMinutes: 120
+        prices: {}

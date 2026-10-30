@@ -1,0 +1,225 @@
+{
+  "schemaVersion": 1,
+  "currency": "USD",
+  "unit": "per 1M tokens",
+  "tier": "Standard on-demand",
+  "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+  "retrievedAt": "2026-10-28",
+  "rows": [
+    {
+      "key": "kimi-k3-global",
+      "name": "Kimi 3 (Global CRIS)",
+      "modelIds": [
+        "global.moonshotai.kimi-k3"
+      ],
+      "region": "global",
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "Moonshot AI",
+        "panel": "Kimi 3",
+        "row": "Global CRIS"
+      }
+    },
+    {
+      "key": "kimi-k3-us",
+      "name": "Kimi 3 (US CRIS)",
+      "modelIds": [
+        "us.moonshotai.kimi-k3"
+      ],
+      "region": "us",
+      "input": 3.3,
+      "output": 16.5,
+      "cacheRead": 0.33,
+      "cacheWrite": 4.125,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "Moonshot AI",
+        "panel": "Kimi 3",
+        "row": "US CRIS"
+      }
+    },
+    {
+      "key": "kimi-k2-thinking-us",
+      "name": "Kimi K2 Thinking (US)",
+      "modelIds": [
+        "moonshot.kimi-k2-thinking",
+        "us.moonshotai.kimi-k2-thinking"
+      ],
+      "region": "us",
+      "input": 0.6,
+      "output": 2.5,
+      "cacheRead": null,
+      "cacheWrite": null,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "Moonshot AI",
+        "panel": "Kimi 2",
+        "row": "Kimi K2 Thinking",
+        "region": "US East (N. Virginia)"
+      }
+    },
+    {
+      "key": "kimi-k2.5-us",
+      "name": "Kimi K2.5 (US)",
+      "modelIds": [
+        "moonshotai.kimi-k2.5",
+        "us.moonshotai.kimi-k2.5"
+      ],
+      "region": "us",
+      "input": 0.6,
+      "output": 3,
+      "cacheRead": null,
+      "cacheWrite": null,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "Moonshot AI",
+        "panel": "Kimi 2",
+        "row": "Kimi K2.5",
+        "region": "US East (N. Virginia)"
+      }
+    },
+    {
+      "key": "deepseek-v3.2-us",
+      "name": "DeepSeek v3.2 (US East/West)",
+      "modelIds": [
+        "deepseek.v3.2",
+        "us.deepseek.v3.2"
+      ],
+      "region": "us",
+      "input": 0.62,
+      "output": 1.85,
+      "cacheRead": null,
+      "cacheWrite": null,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "DeepSeek",
+        "panel": "Standard",
+        "row": "DeepSeek v3.2",
+        "region": "US East (N. Virginia)"
+      }
+    },
+    {
+      "key": "deepseek-v3.2-mumbai-saopaulo-jakarta-tokyo-stockholm",
+      "name": "DeepSeek v3.2 (Mumbai, São Paulo, Jakarta, Tokyo, Stockholm)",
+      "modelIds": [
+        "deepseek.v3.2"
+      ],
+      "region": "mumbai-saopaulo-jakarta-tokyo-stockholm",
+      "input": 0.74,
+      "output": 2.22,
+      "cacheRead": null,
+      "cacheWrite": null,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "DeepSeek",
+        "panel": "Standard",
+        "row": "DeepSeek v3.2",
+        "region": "Asia Pacific (Mumbai)"
+      }
+    },
+    {
+      "key": "deepseek-v3.2-sydney",
+      "name": "DeepSeek v3.2 (Sydney)",
+      "modelIds": [
+        "deepseek.v3.2",
+        "apac.deepseek.v3.2"
+      ],
+      "region": "sydney",
+      "input": 0.6386,
+      "output": 1.9055,
+      "cacheRead": null,
+      "cacheWrite": null,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "DeepSeek",
+        "panel": "Standard",
+        "row": "DeepSeek v3.2",
+        "region": "Asia Pacific (Sydney)"
+      }
+    },
+    {
+      "key": "deepseek-v3.1-sydney",
+      "name": "DeepSeek v3.1 (Sydney)",
+      "modelIds": [
+        "apac.deepseek.v3.1",
+        "deepseek.v3-v1:0"
+      ],
+      "region": "sydney",
+      "input": 0.5974,
+      "output": 1.7304,
+      "cacheRead": null,
+      "cacheWrite": null,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "DeepSeek",
+        "panel": "Standard",
+        "row": "DeepSeek v3.1",
+        "region": "Asia Pacific (Sydney)"
+      }
+    },
+    {
+      "key": "deepseek-v3.1-us",
+      "name": "DeepSeek-V3.1 (US East Ohio, US West Oregon)",
+      "modelIds": [
+        "deepseek.v3-v1:0",
+        "us.deepseek.v3-v1:0"
+      ],
+      "region": "us",
+      "input": 0.58,
+      "output": 1.68,
+      "cacheRead": null,
+      "cacheWrite": null,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "DeepSeek",
+        "panel": "Standard",
+        "row": "DeepSeek-V3.1",
+        "region": "US East (Ohio)"
+      }
+    },
+    {
+      "key": "deepseek-r1-us",
+      "name": "DeepSeek-R1 (US)",
+      "modelIds": [
+        "us.deepseek.r1-v1:0",
+        "deepseek.r1-v1:0"
+      ],
+      "region": "us",
+      "input": 1.35,
+      "output": 5.4,
+      "cacheRead": null,
+      "cacheWrite": null,
+      "verified": false,
+      "sourceUrl": "https://aws.amazon.com/bedrock/pricing/",
+      "retrievedAt": "2026-10-28",
+      "page": {
+        "section": "DeepSeek",
+        "panel": "Standard",
+        "row": "DeepSeek-R1",
+        "region": "US East (N. Virginia)"
+      }
+    }
+  ]
+}

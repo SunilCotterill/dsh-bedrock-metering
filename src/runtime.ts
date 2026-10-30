@@ -1,0 +1,321 @@
+/**
+ * One process's metering state: the ledger view, price book, announcement
+ * memory and the side effects (records, logger, headless stderr) that the
+ * hooks and the `/budget` command share.
+ * @module dsh-bedrock-metering/runtime
+ */
+import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { GenerateOptions, TokenUsage } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, LlmError } from '@deepseek-ai/dsh-llm';
+import type { Session } from '@deepseek-ai/dsh-session';
+import {
+  Announcer, evaluate, formatLocal, formatPercent, formatUsd, stopText, summarize, warningText, windowLabel,
+} from './budget.ts';
+import type { BudgetConfig, Verdict, WindowSummary } from './budget.ts';
+import { appendBudgetRecord } from './events.ts';
+import type { BudgetRecords } from './events.ts';
+import { expandHome, Ledger } from './ledger.ts';
+import type { LedgerRow, UsageRow } from './ledger.ts';
+import { cost, PriceBook } from './pricing.ts';
+import type { CacheFallback, PriceOverrides, PriceTable } from './pricing.ts';
+
+/** Validated plugin config (see `Config` in the entry module). */
+export interface MeteringConfig {
+  ledgerPath: string;
+  budget: BudgetConfig;
+  meter: {
+    providers: string[];
+    region: string;
+    unpricedModel: 'warn-zero' | 'block';
+    cacheFallback: CacheFallback;
+    notifyModel: boolean;
+  };
+  override: { allow: boolean; maxMinutes: number };
+  prices: PriceOverrides;
+}
+
+/** Host effects, injected so tests can drive the runtime without a harness. */
+export interface RuntimeHost {
+  now(): number;
+  newId(): string;
+  /** Logger warning (Cordis keeps it in an in-memory ring buffer; see README). */
+  warn(message: string): void;
+  error(message: string, error?: unknown): void;
+  /** Direct stderr line, present only in the headless profile. */
+  stderr(): ((line: string) => void) | undefined;
+  session(id: string): Session | undefined;
+  agent(id: string): Agent | undefined;
+  /** Dsh home and profile name stamped on every ledger row. */
+  home: string;
+  profile: string;
+}
+
+/** Stable error code thrown by the stream guard. */
+export const BUDGET_EXCEEDED = 'BUDGET_EXCEEDED';
+/** Stable error code for a metered model without a price under `unpricedModel: block`. */
+export const UNPRICED_MODEL = 'BUDGET_UNPRICED_MODEL';
+
+const MINUTE = 60_000;
+
+export class MeteringRuntime {
+  readonly config: MeteringConfig;
+  readonly host: RuntimeHost;
+  readonly ledger: Ledger;
+  readonly prices: PriceBook;
+  private readonly providers: ReadonlySet<string>;
+  private readonly announcer = new Announcer();
+  /** Latest `step/start` position per session, stamped on ledger rows. */
+  readonly positions = new Map<string, { turn: number; step: number }>();
+  private readonly unpricedWarned = new Set<string>();
+
+  constructor(config: MeteringConfig, host: RuntimeHost, table: PriceTable) {
+    this.config = config;
+    this.host = host;
+    this.ledger = new Ledger(expandHome(config.ledgerPath));
+    this.providers = new Set(config.meter.providers);
+    this.prices = new PriceBook(table, config.prices, config.meter.region, config.meter.providers);
+  }
+
+  isMetered(provider: string | undefined): boolean {
+    return provider !== undefined && this.providers.has(provider);
+  }
+
+  /** Whether the agent's next request may go to a metered route (its options or its last logged header). */
+  agentIsMetered(agent: Agent): boolean {
+    return this.isMetered(agent.options.provider) || this.isMetered(agent.session.requestHeader()?.config.provider);
+  }
+
+  /**
+   * Refresh the ledger view and evaluate the current window.
+   * @param session - session id, used by the `session` window.
+   * @returns the window summary and verdict.
+   */
+  current(session?: string): { summary: WindowSummary; verdict: Verdict } {
+    const now = this.host.now();
+    const { window } = this.config.budget;
+    // Hold rows from before the window too, so an override set just before midnight survives it.
+    const keepFrom = window === 'session'
+      ? Number.NEGATIVE_INFINITY
+      : summarize([], window, now).start - this.config.override.maxMinutes * MINUTE;
+    try {
+      this.ledger.refresh(keepFrom);
+    } catch (error) {
+      this.host.error(`bedrock-metering: cannot read ledger ${this.ledger.path}`, error);
+    }
+    const summary = summarize(this.ledger.rows(), window, now, session);
+    return { summary, verdict: evaluate(summary, this.config.budget, now) };
+  }
+
+  /**
+   * Append one usage row for a finished (or failed) model call, then announce any newly crossed threshold.
+   * @param options - the request.
+   * @param usage - the last `usage` chunk the call reported.
+   * @param outcome - terminal finish kind, or how the stream ended without one.
+   * @param attempt - id minted for this call.
+   */
+  recordUsage(options: GenerateOptions, usage: TokenUsage, outcome: string, attempt: string): void {
+    const metered = this.isMetered(options.provider);
+    const match = metered ? this.prices.lookup(options.provider, options.model) : undefined;
+    if (metered && match === undefined) this.warnUnpriced(options.provider, options.model);
+    const usd = match === undefined ? 0 : cost(usage, match.price, this.config.meter.cacheFallback);
+    const position = options.sessionId === undefined ? undefined : this.positions.get(options.sessionId);
+    const row: UsageRow = {
+      ...this.base(options.sessionId),
+      kind: 'usage',
+      ...position,
+      attempt,
+      ...options.purpose === undefined ? {} : { purpose: options.purpose },
+      provider: options.provider,
+      model: options.model,
+      in: usage.inputTokens,
+      out: usage.outputTokens,
+      cacheRead: usage.cacheReadTokens ?? 0,
+      cacheWrite: usage.cacheWriteTokens ?? 0,
+      reasoning: usage.reasoningTokens ?? 0,
+      usd: Math.round(usd * 1e8) / 1e8,
+      metered,
+      priced: match !== undefined,
+      ...match === undefined ? {} : { price: match.source },
+      outcome,
+    };
+    this.append(row);
+    if (!metered) return;
+    const sessionId = options.sessionId;
+    const agent = sessionId === undefined ? undefined : this.host.agent(sessionId);
+    const { summary, verdict } = this.current(sessionId);
+    this.announce(agent, sessionId, summary, verdict);
+  }
+
+  /**
+   * Refuse a metered model call when the budget is spent (D5 guard), or when
+   * its model is unpriced under `unpricedModel: block`.
+   * @param options - the request about to be dispatched.
+   * @param attempt - id minted for this call.
+   * @throws LlmError with {@link BUDGET_EXCEEDED} or {@link UNPRICED_MODEL}.
+   */
+  guard(options: GenerateOptions, attempt: string): void {
+    if (!this.isMetered(options.provider)) return;
+    if (this.config.meter.unpricedModel === 'block' && this.prices.lookup(options.provider, options.model) === undefined) {
+      this.refuse(options, attempt);
+      throw new LlmError(`bedrock-metering: no price for ${options.provider}/${options.model}; add it under prices in the profile patch`, UNPRICED_MODEL);
+    }
+    const { summary, verdict } = this.current(options.sessionId);
+    if (!verdict.stop) return;
+    this.refuse(options, attempt);
+    const session = options.sessionId === undefined ? undefined : this.host.session(options.sessionId);
+    this.stopped(session, summary, {
+      via: 'stream-guard',
+      provider: options.provider,
+      model: options.model,
+      ...options.purpose === undefined ? {} : { purpose: options.purpose },
+    });
+    throw new LlmError(`budget ${stopText(summary, this.config.budget)}`, BUDGET_EXCEEDED);
+  }
+
+  /**
+   * Decide one proposed step (D5 primary stop).
+   * @param agent - the agent proposing the step.
+   * @param turn - the step's turn.
+   * @param step - the proposed step.
+   * @returns true when the step must be rejected.
+   */
+  gate(agent: Agent, turn: number, step: number): boolean {
+    if (!this.agentIsMetered(agent)) return false;
+    const { summary, verdict } = this.current(agent.session.id);
+    if (verdict.stop) {
+      this.stopped(agent.session, summary, { via: 'pre-step', turn, step });
+      return true;
+    }
+    this.announce(agent, agent.session.id, summary, verdict);
+    return false;
+  }
+
+  /** Announce a newly crossed warning threshold once per window in this process. */
+  announce(agent: Agent | undefined, sessionId: string | undefined, summary: WindowSummary, verdict: Verdict): void {
+    const threshold = this.announcer.next(summary, verdict, sessionId);
+    if (threshold === undefined) return;
+    const text = warningText(summary, verdict, this.config.budget);
+    this.notify(`budget: ${text}`);
+    const session = agent?.session ?? (sessionId === undefined ? undefined : this.host.session(sessionId));
+    if (session !== undefined) {
+      this.record(session, 'warning', {
+        window: summary.window,
+        windowStart: isoOrEpoch(summary.start),
+        limitUsd: this.config.budget.limitUsd,
+        spentUsd: round(summary.spentUsd),
+        threshold,
+        fraction: Number.isFinite(verdict.fraction) ? round(verdict.fraction) : 1e9,
+      });
+    }
+    if (this.config.meter.notifyModel && agent !== undefined) {
+      const summaryLine = `Bedrock budget: ${text}`;
+      agent.inject(createUserMessage({
+        content: [{ type: 'text', text: `${summaryLine}. Wrap up soon; the agent stops at ${formatPercent(this.config.budget.stopAt)} of the limit.` }],
+        source: { kind: 'bedrock-metering', form: 'notice', summary: summaryLine.slice(0, 120) },
+      }));
+    }
+  }
+
+  /**
+   * `/budget override <minutes>`: lift the stop for every process sharing the ledger.
+   * @returns the command reply.
+   */
+  override(agent: Agent, minutes: number): string {
+    const now = this.host.now();
+    const until = now + minutes * MINUTE;
+    const { summary } = this.current(agent.session.id);
+    this.append({ ...this.base(agent.session.id), kind: 'override', until: new Date(until).toISOString(), minutes });
+    this.record(agent.session, 'override', {
+      minutes, until: new Date(until).toISOString(), limitUsd: this.config.budget.limitUsd, spentUsd: round(summary.spentUsd),
+    });
+    this.notify(`budget: stop lifted for ${minutes} min, until ${formatLocal(until)}`);
+    return `Budget stop lifted until ${formatLocal(until)} local time (${minutes} min) for every dsh process using ${this.ledger.path}. ` +
+      `Spent so far: ${formatUsd(summary.spentUsd)} of ${formatUsd(this.config.budget.limitUsd)}.`;
+  }
+
+  /**
+   * `/budget reset`: start a fresh window now (for mistakes only).
+   * @returns the command reply.
+   */
+  reset(agent: Agent): string {
+    const { summary } = this.current(agent.session.id);
+    this.append({ ...this.base(agent.session.id), kind: 'reset' });
+    this.record(agent.session, 'reset', {
+      window: summary.window, previousStart: isoOrEpoch(summary.start), spentUsd: round(summary.spentUsd),
+    });
+    this.notify(`budget: window reset (was ${formatUsd(summary.spentUsd)})`);
+    return `Budget window reset: spend counts from now. ${formatUsd(summary.spentUsd)} spent since ${formatStart(summary.start)} no longer counts toward the ${windowLabel(summary.window)} limit. ` +
+      'The reset is recorded in the ledger and on this session.';
+  }
+
+  /** Row fields shared by every kind. */
+  private base(session: string | undefined): Pick<UsageRow, 'v' | 'ts' | 'home' | 'profile' | 'session'> {
+    return {
+      v: 1,
+      ts: new Date(this.host.now()).toISOString(),
+      home: this.host.home,
+      profile: this.host.profile,
+      ...session === undefined ? {} : { session },
+    };
+  }
+
+  private append(row: LedgerRow): void {
+    try {
+      this.ledger.append(row);
+    } catch (error) {
+      this.host.error(`bedrock-metering: cannot append to ledger ${this.ledger.path}`, error);
+    }
+  }
+
+  private refuse(options: GenerateOptions, attempt: string): void {
+    this.append({
+      ...this.base(options.sessionId),
+      kind: 'refused',
+      attempt,
+      ...options.purpose === undefined ? {} : { purpose: options.purpose },
+      provider: options.provider,
+      model: options.model,
+    });
+  }
+
+  private stopped(session: Session | undefined, summary: WindowSummary, detail: Omit<BudgetRecords['stop'], 'window' | 'windowStart' | 'limitUsd' | 'spentUsd'>): void {
+    this.notify(`budget: ${stopText(summary, this.config.budget)}`);
+    if (session === undefined) return;
+    this.record(session, 'stop', {
+      window: summary.window,
+      windowStart: isoOrEpoch(summary.start),
+      limitUsd: this.config.budget.limitUsd,
+      spentUsd: round(summary.spentUsd),
+      ...detail,
+    });
+  }
+
+  private record<K extends keyof BudgetRecords>(session: Session, kind: K, data: BudgetRecords[K]): void {
+    const error = appendBudgetRecord(session, kind, data);
+    if (error !== undefined) this.host.error(`bedrock-metering: cannot record budget ${kind} on session ${session.id}`, error);
+  }
+
+  private notify(message: string): void {
+    this.host.warn(message);
+    this.host.stderr()?.(`dsh: ${message}`);
+  }
+
+  private warnUnpriced(provider: string, model: string): void {
+    const key = `${provider}/${model}`;
+    if (this.unpricedWarned.has(key)) return;
+    this.unpricedWarned.add(key);
+    this.notify(`budget: no Bedrock price for ${key}; its calls count as $0 (add it under prices in the profile patch)`);
+  }
+}
+
+function round(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+function isoOrEpoch(at: number): string {
+  return Number.isFinite(at) ? new Date(at).toISOString() : 'session-start';
+}
+
+function formatStart(at: number): string {
+  return Number.isFinite(at) ? formatLocal(at) : 'the session start';
+}
