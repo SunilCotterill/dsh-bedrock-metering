@@ -1,6 +1,6 @@
 {
   "name": "dsh-bedrock-metering",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Meters DeepSeek Harness model calls at Amazon Bedrock on-demand prices, warns near a daily budget, and stops the agent once it is exceeded",
   "private": true,
   "license": "MIT",

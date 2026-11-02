@@ -24,7 +24,7 @@ runs no build step.
 **From the web UI.** Open **Plugins** in the sidebar, click **Add plugin**, paste
 
 ```text
-github:SunilCotterill/dsh-bedrock-metering#v0.1.0
+github:SunilCotterill/dsh-bedrock-metering#v0.1.1
 ```
 
 then click **Install** and, when it finishes, **Enable now** (closing the dialog instead leaves the
@@ -36,15 +36,15 @@ Run it for each dsh profile that reaches Bedrock (here the `web` and `headless` 
 `~/.dsh-local`; change `DSH_HOME` and `--profile` to match your setup):
 
 ```bash
-DSH_HOME=$HOME/.dsh-local npx -y @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile web add "github:SunilCotterill/dsh-bedrock-metering#v0.1.0"
+DSH_HOME=$HOME/.dsh-local npx -y @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile web add "github:SunilCotterill/dsh-bedrock-metering#v0.1.1"
 ```
 
 ```bash
-DSH_HOME=$HOME/.dsh-local npx -y @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile headless add "github:SunilCotterill/dsh-bedrock-metering#v0.1.0"
+DSH_HOME=$HOME/.dsh-local npx -y @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile headless add "github:SunilCotterill/dsh-bedrock-metering#v0.1.1"
 ```
 
 `dsh plugin` runs `pnpm add` in the profile directory, so any git spec pnpm accepts works. A tag
-can be moved, so to install exactly the code you reviewed, put a commit hash in place of `v0.1.0`. The package declares `dsh.bundle.patch`, so `add` also appends
+can be moved, so to install exactly the code you reviewed, put a commit hash in place of `v0.1.1`. The package declares `dsh.bundle.patch`, so `add` also appends
 `dsh-bedrock-metering` to the profile's bundle list, and its `cordis.patch.yml` inserts the
 `bedrock-metering` row with the defaults below. Restart dsh to load it (a running `dsh web` keeps
 its old tree), then check that startup printed no `skipping profile bundle` line and that the row
@@ -68,7 +68,7 @@ Before you rely on it:
   `meter.providers` count toward the budget. If your `llm-pi-ai` provider has another name, add it
   there (see Configuration), or the plugin logs your calls at $0 and never stops you.
 - **The budget is yours, not the team's.** The ledger lives on your machine, so each person gets
-  their own limit ($50/day by default). Set yours in your profile patch. A cap on the shared AWS
+  their own limit ($300/day by default). Set yours in your profile patch. A cap on the shared AWS
   account needs AWS Budgets; this plugin cannot see other people's spend.
 - **Prices are estimates** until the Kimi K3 row has been checked against an AWS bill (see Prices).
 
@@ -93,7 +93,7 @@ Defaults (from `cordis.patch.yml`):
 ledgerPath: ~/.dsh-bedrock-metering/ledger.jsonl   # shared by every DSH_HOME and process
 budget:
   window: day             # day | month | session; day and month start at local midnight
-  limitUsd: 50            # placeholder: set your own
+  limitUsd: 300           # USD per window
   warnAt: [0.8, 0.95]     # fractions of limitUsd, each announced once per window per process
   stopAt: 1               # fraction of limitUsd at which the agent stops
 meter:
@@ -165,9 +165,9 @@ The headless runner sends its task text straight to the agent and never parses s
 
 ## Headless behaviour
 
-- A crossed threshold prints `dsh: budget: 82% of $50.00 daily limit used ($41.10)` on stderr.
+- A crossed threshold prints `dsh: budget: 82% of $300.00 daily limit used ($246.00)` on stderr.
 - A stopped run prints
-  `dsh: budget: stopped: $50.12 of $50.00 daily Bedrock budget used; the window resets at 2026-10-29 00:00 local time. Run /budget override <minutes> in the web UI or raise budget.limitUsd in the profile patch to continue.`
+  `dsh: budget: stopped: $300.12 of $300.00 daily Bedrock budget used; the window resets at 2026-10-29 00:00 local time. Run /budget override <minutes> in the web UI or raise budget.limitUsd in the profile patch to continue.`
   and exits 1 (the turn ends `blocked`; the runner exits 1 on any non-`completed` turn).
 - A refusal by the stream guard ends the turn with an error, and the runner adds its own
   `dsh: BUDGET_EXCEEDED: …` line.
