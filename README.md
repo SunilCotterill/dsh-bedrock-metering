@@ -30,7 +30,7 @@ runs no build step.
 **From the web UI.** Open **Plugins** in the sidebar, click **Add plugin**, paste
 
 ```text
-github:SunilCotterill/dsh-bedrock-metering#v0.2.0
+github:SunilCotterill/dsh-bedrock-metering#v0.2.1
 ```
 
 then click **Install** and, when it finishes, **Enable now** (closing the dialog instead leaves the
@@ -42,15 +42,15 @@ Run it for each dsh profile that reaches Bedrock (here the `web` and `headless` 
 `~/.dsh-local`; change `DSH_HOME` and `--profile` to match your setup):
 
 ```bash
-DSH_HOME=$HOME/.dsh-local npx -y @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile web add "github:SunilCotterill/dsh-bedrock-metering#v0.2.0"
+DSH_HOME=$HOME/.dsh-local npx -y @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile web add "github:SunilCotterill/dsh-bedrock-metering#v0.2.1"
 ```
 
 ```bash
-DSH_HOME=$HOME/.dsh-local npx -y @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile headless add "github:SunilCotterill/dsh-bedrock-metering#v0.2.0"
+DSH_HOME=$HOME/.dsh-local npx -y @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile headless add "github:SunilCotterill/dsh-bedrock-metering#v0.2.1"
 ```
 
 `dsh plugin` runs `pnpm add` in the profile directory, so any git spec pnpm accepts works. A tag
-can be moved, so to install exactly the code you reviewed, put a commit hash in place of `v0.2.0`. The package declares `dsh.bundle.patch`, so `add` also appends
+can be moved, so to install exactly the code you reviewed, put a commit hash in place of `v0.2.1`. The package declares `dsh.bundle.patch`, so `add` also appends
 `dsh-bedrock-metering` to the profile's bundle list, and its `cordis.patch.yml` inserts the
 `bedrock-metering` row with the defaults below. Restart dsh to load it (a running `dsh web` keeps
 its old tree), then check that startup printed no `skipping profile bundle` line and that the row
