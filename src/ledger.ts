@@ -17,6 +17,8 @@ interface RowBase {
   home: string;
   profile: string;
   session?: string;
+  /** Top-level conversation, when {@link session} is a subagent's child session; absent otherwise. */
+  conversation?: string;
 }
 
 /** One metered model call. Rows without `kind` (hand-written or older) are read as usage. */

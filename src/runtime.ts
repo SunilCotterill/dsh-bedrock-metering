@@ -57,6 +57,18 @@ export const UNPRICED_MODEL = 'BUDGET_UNPRICED_MODEL';
 
 const MINUTE = 60_000;
 
+/**
+ * The parent of a subagent child session, read from its immutable header.
+ * A user fork also records `parentSession` but is a conversation of its own,
+ * so only `origin: 'subagent'` sessions roll into their parent.
+ * @param session - a live session.
+ * @returns the parent session id, or undefined for a top-level session.
+ */
+export function subagentParent(session: Session): string | undefined {
+  const { header } = session;
+  return header.origin === 'subagent' ? header.parentSession : undefined;
+}
+
 export class MeteringRuntime {
   readonly config: MeteringConfig;
   readonly host: RuntimeHost;
@@ -87,9 +99,10 @@ export class MeteringRuntime {
 
   /**
    * Refresh the ledger view and evaluate the current window.
-   * @param session - session id scoping the `session` (conversation) window. Without one a
-   *   conversation window sums nothing, so a model call that carries no session id is logged
-   *   but neither counted toward a conversation nor stopped.
+   * @param session - session id scoping the `session` (conversation) window; a subagent's
+   *   child session resolves to its parent conversation. Without one a conversation window
+   *   sums nothing, so a model call that carries no session id is logged but neither counted
+   *   toward a conversation nor stopped.
    * @returns the window summary and verdict.
    */
   current(session?: string): { summary: WindowSummary; verdict: Verdict } {
@@ -104,8 +117,39 @@ export class MeteringRuntime {
     } catch (error) {
       this.host.error(`bedrock-metering: cannot read ledger ${this.ledger.path}`, error);
     }
-    const summary = summarize(this.ledger.rows(), window, now, session);
+    const conversation = window === 'session' && session !== undefined ? this.conversationOf(session) : undefined;
+    const summary = summarize(this.ledger.rows(), window, now, conversation);
     return { summary, verdict: evaluate(summary, this.config.budget, now) };
+  }
+
+  /**
+   * The conversation a session belongs to: the top-level session above any
+   * chain of subagent children. Live sessions are walked through their
+   * headers; a session that is not live is looked up in the ledger, whose
+   * rows record the conversation of every child session.
+   * @param session - session id.
+   * @returns the top-level session id (the session itself when it is top-level).
+   */
+  conversationOf(session: string): string {
+    const seen = new Set<string>();
+    let current = session;
+    for (;;) {
+      seen.add(current);
+      const live = this.host.session(current);
+      const parent = live === undefined ? this.recordedConversation(current) : subagentParent(live);
+      if (parent === undefined || seen.has(parent)) return current;
+      current = parent;
+    }
+  }
+
+  /** The conversation the ledger last recorded for a child session, if any. */
+  private recordedConversation(session: string): string | undefined {
+    const rows = this.ledger.rows();
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const { row } = rows[i]!;
+      if (row.session === session && row.conversation !== undefined) return row.conversation;
+    }
+    return undefined;
   }
 
   /**
@@ -194,7 +238,7 @@ export class MeteringRuntime {
 
   /** Announce a newly crossed warning threshold once per window in this process. */
   announce(agent: Agent | undefined, sessionId: string | undefined, summary: WindowSummary, verdict: Verdict): void {
-    const threshold = this.announcer.next(summary, verdict, sessionId);
+    const threshold = this.announcer.next(summary, verdict);
     if (threshold === undefined) return;
     const text = warningText(summary, verdict, this.config.budget);
     this.notify(`budget: ${text}`);
@@ -234,7 +278,7 @@ export class MeteringRuntime {
     });
     const spent = `${formatUsd(summary.spentUsd)} of ${formatUsd(limitUsd)}`;
     if (window === 'session') {
-      this.notify(`budget: stop lifted for conversation ${agent.session.id} for ${minutes} min, until ${formatLocal(until)}`);
+      this.notify(`budget: stop lifted for conversation ${summary.conversation ?? agent.session.id} for ${minutes} min, until ${formatLocal(until)}`);
       return `Budget stop lifted for this conversation until ${formatLocal(until)} local time (${minutes} min). ` +
         `Spent in this conversation: ${spent}.`;
     }
@@ -256,7 +300,7 @@ export class MeteringRuntime {
       window: summary.window, previousStart: isoOrEpoch(summary.start), spentUsd: round(summary.spentUsd),
     });
     if (window === 'session') {
-      this.notify(`budget: conversation ${agent.session.id} reset (was ${formatUsd(summary.spentUsd)})`);
+      this.notify(`budget: conversation ${summary.conversation ?? agent.session.id} reset (was ${formatUsd(summary.spentUsd)})`);
       return `Conversation budget reset: spend counts from now. ${formatUsd(summary.spentUsd)} spent since ${formatStart(summary.start)} ` +
         `no longer counts toward this conversation's ${formatUsd(limitUsd)} limit. Other conversations are unaffected. ` +
         'The reset is recorded in the ledger and on this conversation.';
@@ -266,14 +310,16 @@ export class MeteringRuntime {
       'The reset is recorded in the ledger and on this session.';
   }
 
-  /** Row fields shared by every kind. */
-  private base(session: string | undefined): Pick<UsageRow, 'v' | 'ts' | 'home' | 'profile' | 'session'> {
+  /** Row fields shared by every kind; a subagent's rows also name their conversation. */
+  private base(session: string | undefined): Pick<UsageRow, 'v' | 'ts' | 'home' | 'profile' | 'session' | 'conversation'> {
+    const conversation = session === undefined ? undefined : this.conversationOf(session);
     return {
       v: 1,
       ts: new Date(this.host.now()).toISOString(),
       home: this.host.home,
       profile: this.host.profile,
       ...session === undefined ? {} : { session },
+      ...conversation === undefined || conversation === session ? {} : { conversation },
     };
   }
 

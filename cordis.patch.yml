@@ -9,7 +9,7 @@
         ledgerPath: ~/.dsh-bedrock-metering/ledger.jsonl
         budget:
           window: session
-          limitUsd: 50
+          limitUsd: 300
           warnAt: [0.8, 0.95]
           stopAt: 1
         meter:

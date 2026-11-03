@@ -67,6 +67,9 @@ export function budgetStatus(summary: WindowSummary, verdict: Verdict, config: B
     ? `${spent} of ${formatUsd(config.limitUsd)} Bedrock budget for this conversation (${percent})`
     : `${spent} of ${formatUsd(config.limitUsd)} ${windowLabel(config.window)} Bedrock budget (${percent})`];
   if (summary.end !== undefined) lines.push(`Resets ${formatLocal(summary.end)}`);
+  if (summary.subagentSessions > 0) {
+    lines.push(`Includes ${formatUsd(summary.subagentUsd)} from ${summary.subagentSessions} subagent${summary.subagentSessions === 1 ? '' : 's'}`);
+  }
   if (conversation && Number.isFinite(summary.start)) lines.push(`Counted since the /budget reset at ${formatLocal(summary.start)}`);
   if (config.warnAt.length > 0) lines.push(`Warns at ${config.warnAt.map(formatPercent).join(', ')}; stops at ${formatPercent(config.stopAt)}`);
   if (summary.overrideUntil !== undefined) lines.push(`Override active until ${formatLocal(summary.overrideUntil)}`);

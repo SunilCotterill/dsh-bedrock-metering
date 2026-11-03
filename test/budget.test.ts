@@ -107,6 +107,25 @@ describe('conversation window', () => {
     assert.equal(summarize(rows, 'session', now, 's2').refused, 1);
   });
 
+  it('rolls subagent rows stamped with the conversation into its total', () => {
+    const child = { session: 'c1', conversation: 's1' } as Partial<LedgerRow>;
+    const until = new Date(now + 30 * 60_000).toISOString();
+    const rows = [
+      usage(now - 5, 2, s1), usage(now - 4, 0.5, child), usage(now - 3, 0.25, { session: 'c2', conversation: 's1' } as Partial<LedgerRow>),
+      usage(now - 2, 7, s2),
+      control(now - 1, { kind: 'override', until, minutes: 30, window: 'session', ...child } as Partial<LedgerRow>),
+    ];
+    const summary = summarize(rows, 'session', now, 's1');
+    assert.equal(summary.conversation, 's1');
+    assert.equal(summary.spentUsd, 2.75);
+    assert.equal(summary.subagentUsd, 0.75);
+    assert.equal(summary.subagentSessions, 2);
+    assert.equal(summary.overrideUntil, Date.parse(until));
+    assert.equal(summarize(rows, 'session', now, 's2').spentUsd, 7);
+    assert.equal(summarize(rows, 'session', now, 's2').overrideUntil, undefined);
+    assert.equal(summarize(rows, 'day', now).subagentSessions, 0);
+  });
+
   it('warns and stops each conversation against its own spend', () => {
     const rows = [usage(now - 3, 40, s1), usage(now - 2, 10, s2), usage(now - 1, 9.99, s2)];
     const verdict = (session: string) => evaluate(summarize(rows, 'session', now, session), perConversation, now);
@@ -158,7 +177,7 @@ describe('conversation window', () => {
     const rows = [usage(now - 2, 41, s1), usage(now - 1, 42, s2)];
     const next = (session: string) => {
       const summary = summarize(rows, 'session', now, session);
-      return announcer.next(summary, evaluate(summary, perConversation, now), session);
+      return announcer.next(summary, evaluate(summary, perConversation, now));
     };
     assert.equal(next('s1'), 0.8);
     assert.equal(next('s1'), undefined);

@@ -9,8 +9,8 @@ conversation approaches its budget, and stops the agent once that conversation's
   `meter.providers` (default `amazon-bedrock`) count toward the budget; every other route is logged
   with token counts and `usd: 0`.
 - **Budget per conversation:** by default (`budget.window: session`) the limit applies to each
-  conversation (one dsh session) on its own: $50 per conversation, a placeholder until you pick a
-  figure. The composer pill shows the conversation's total spend. See
+  conversation (a dsh session together with its subagents) on its own: $300 per conversation by
+  default. The composer pill shows the conversation's total spend, subagents included. See
   [What counts as a conversation](#what-counts-as-a-conversation).
 - **Warn:** each `warnAt` threshold (default 80% and 95%) is announced once per conversation per
   process, as a durable session record, a logger line and, in the headless profile, a stderr line.
@@ -74,11 +74,11 @@ Before you rely on it:
   `meter.providers` count toward the budget. If your `llm-pi-ai` provider has another name, add it
   there (see Configuration), or the plugin logs your calls at $0 and never stops you.
 - **The budget is yours, not the team's.** The ledger lives on your machine, so each person gets
-  their own limit ($50 per conversation by default, a placeholder). Set yours in your profile
+  their own limit ($300 per conversation by default). Set yours in your profile
   patch. A per-conversation limit does not cap a day's total: many conversations can each spend up
   to the limit. A cap on the shared AWS account needs AWS Budgets; this plugin cannot see other
   people's spend.
-- **Upgrading from 0.1.x changes the default** from $300 per day to $50 per conversation. To keep
+- **Upgrading from 0.1.x changes the default** from $300 per day to $300 per conversation. To keep
   a daily limit, set `window: day` and your `limitUsd` in the profile patch (see Configuration).
 - **Prices are estimates** until the Kimi K3 row has been checked against an AWS bill (see Prices).
 
@@ -103,7 +103,7 @@ Defaults (from `cordis.patch.yml`):
 ledgerPath: ~/.dsh-bedrock-metering/ledger.jsonl   # shared by every DSH_HOME and process
 budget:
   window: session         # session (one conversation) | day | month; day and month start at local midnight
-  limitUsd: 50            # USD per window: per conversation by default (placeholder figure)
+  limitUsd: 300           # USD per window: per conversation by default
   warnAt: [0.8, 0.95]     # fractions of limitUsd, each announced once per conversation (or window) per process
   stopAt: 1               # fraction of limitUsd at which the agent stops
 meter:
@@ -118,8 +118,8 @@ override:
 prices: {}                      # provider route -> model id -> {input, output, cacheRead?, cacheWrite?}, USD per 1M tokens
 ```
 
-**$50 per conversation is a placeholder.** No per-conversation figure has been chosen yet; set
-your own `limitUsd`. The config value for a conversation is `session` (one dsh session).
+**$300 per conversation is the default** (chosen 2026-11-03); set your own `limitUsd` to change
+it. The config value for a conversation is `session` (a dsh session with its subagents).
 
 Override in `~/.dsh-local/profiles/<web|headless>/cordis.patch.yml`. A patch replaces the row's
 whole `config`, so restate every key:
@@ -140,24 +140,32 @@ the same rows against its own configured limit.
 
 ### What counts as a conversation
 
-A conversation is one dsh session, identified by its session id. Every ledger row carries the
-session id of the call that produced it, and the conversation window sums the rows with that id,
-however many days the conversation spans.
+A conversation is a top-level dsh session together with the subagents it starts (and theirs).
+Every ledger row carries the session id of the call that produced it; a subagent's rows also carry
+`conversation`, the top-level session id. The conversation window sums every row of the
+conversation, however many days it spans.
 
 - **Loop calls, session titles and compaction** carry the conversation's own session id, so they
   count toward it and are refused once it is stopped.
-- **Subagents count toward their own budget.** dsh runs each subagent in a child session with a
-  fresh id, so a subagent's spend counts toward that child's own limit, not its parent's. It does
-  not show in the parent conversation's pill or `/budget status`; open the subagent's session to see
-  it. A stopped subagent does not stop its parent, and a stopped parent does not stop a running
-  subagent. A parent can therefore spend more than the limit in total through its subagents.
+- **Subagents count toward their parent conversation.** dsh runs each subagent in a child session
+  with a fresh id and records the parent in the child's header (`origin: subagent`,
+  `parentSession`). The plugin follows that link, through nested subagents too, and stamps the
+  top-level id on the child's rows. A subagent's spend therefore shows in the parent's pill and
+  `/budget status` (which say how much of it came from subagents) and counts toward the parent's
+  limit. Once the conversation is over the limit, the parent and its running subagents all stop.
+  Opening a subagent's session shows the whole conversation's total.
+- **A forked conversation is a new conversation.** A user fork also records `parentSession`, but
+  without `origin: subagent`, so it starts its own count.
+- **Subagent spend from before 0.2.1 stays under its own session.** Those rows have no
+  `conversation`, and a finished subagent's session is no longer live for the plugin to look up.
+  On this machine that is $0.58 from two subagents of one conversation on 30 October.
 - **Each headless run is its own conversation** (a new session id) and starts at $0, unless it
   resumes a session with `--session-id`.
 - **A call with no session id counts toward no conversation and is never refused.** It is still
   logged. In dsh 0.2.1-rc.5 only the experimental auto-review reviewer makes such calls, and it is
   not enabled in the `~/.dsh-local` profiles.
 - **Override and reset are per conversation.** `/budget override` and `/budget reset` apply only to
-  the conversation they are typed in.
+  the conversation they are typed in, subagents included, even when typed in a subagent's session.
 
 Rows written before 0.2.0 already carry session ids, so each past conversation keeps its spend.
 With `window: day` or `month` the plugin goes back to calendar windows shared by every
@@ -179,12 +187,13 @@ per-conversation limit:
 | Below the first `warnAt` threshold | `$1.23`, neutral |
 | From the first threshold (80%) | amber |
 | From the last threshold (95%, when there are several) | red |
-| Stopped | `$50.12 · stopped`, red |
-| Over the limit with an active override | amber, e.g. `$52.00` |
+| Stopped | `$300.12 · stopped`, red |
+| Over the limit with an active override | amber, e.g. `$312.00` |
 
 A thin bar shows the fraction of the limit used. Hovering shows the conversation's spend, limit
-and percentage (for example `$1.23 of $50.00 Bedrock budget for this conversation (2%)`), the
-thresholds, any active override or `/budget reset` and, when stopped, how to continue. Under a
+and percentage (for example `$12.30 of $300.00 Bedrock budget for this conversation (4%)`), how
+much of it came from subagents, the thresholds, any active override or `/budget reset` and, when
+stopped, how to continue. Under a
 `day` or `month` window the label is the window's spend and the hover text adds the reset time.
 The pill reads `GET /bedrock-metering/status?session=<id>` every 10 seconds and when the window
 regains focus, so new spend or a `/budget override` shows up within about 10 seconds. The composer
@@ -199,7 +208,7 @@ Type it in the web chat composer:
 
 | Command | Effect |
 |---|---|
-| `/budget` or `/budget status` | This conversation's spend against the limit, thresholds, override state, total metered calls and tokens, per-route calls and tokens (metered and not), refused and unpriced calls, price-table date, ledger path |
+| `/budget` or `/budget status` | This conversation's spend against the limit (subagents included, with their share), thresholds, override state, total metered calls and tokens, per-route calls and tokens (metered and not), refused and unpriced calls, price-table date, ledger path |
 | `/budget override <minutes>` | Lift this conversation's stop for 1 to `maxMinutes` minutes. Other conversations are not affected. Written to the ledger (with `window: session` and the session id) and recorded on the conversation. Under a `day` or `month` window it lifts the stop for every dsh process sharing the ledger, including headless subprocesses |
 | `/budget reset` | Restart this conversation's count from now (for mistakes); other conversations are not affected. Written to the ledger and recorded on the conversation. Under a `day` or `month` window it starts a fresh window for everyone |
 
@@ -210,9 +219,9 @@ The headless runner sends its task text straight to the agent and never parses s
 
 ## Headless behaviour
 
-- A crossed threshold prints `dsh: budget: 82% of $50.00 conversation limit used ($41.00)` on stderr.
+- A crossed threshold prints `dsh: budget: 82% of $300.00 conversation limit used ($246.00)` on stderr.
 - A stopped run prints
-  `dsh: budget: stopped: $50.12 of $50.00 conversation Bedrock budget used; this conversation stays stopped. Start a new conversation, run /budget override <minutes> in this one in the web UI, or raise budget.limitUsd in the profile patch to continue.`
+  `dsh: budget: stopped: $300.12 of $300.00 conversation Bedrock budget used; this conversation stays stopped. Start a new conversation, run /budget override <minutes> in this one in the web UI, or raise budget.limitUsd in the profile patch to continue.`
   and exits 1 (the turn ends `blocked`; the runner exits 1 on any non-`completed` turn). A new
   headless run is a new conversation and starts at $0.
 - A refusal by the stream guard ends the turn with an error, and the runner adds its own
@@ -228,9 +237,12 @@ incrementally, skip a partial trailing line, and dedupe by `(kind, session, turn
 {"v":1,"ts":"2026-10-28T18:32:05.701Z","home":"/Users/x/.dsh-local","profile":"web","session":"session-…","kind":"usage","turn":1,"step":1,"attempt":"…","provider":"amazon-bedrock","model":"global.moonshotai.kimi-k3","in":2000,"out":340,"cacheRead":10000,"cacheWrite":0,"reasoning":0,"usd":0.0141,"metered":true,"priced":true,"price":"kimi-k3-global","outcome":"stop"}
 ```
 
+A subagent's rows (every kind) also carry `"conversation"`, the top-level session id of the
+conversation they count toward.
+
 Other kinds: `refused` (a call the guard stopped; carries `purpose` such as `session-title`),
 `override` (`until`, `minutes`, `window`) and `reset` (`window`). An override or reset written
-under the conversation window (`"window":"session"`) applies only to its own `session`, and
+under the conversation window (`"window":"session"`) applies only to its own conversation, and
 calendar windows ignore it. Rows from 0.1.x have no `window`; calendar windows apply them to
 everyone, and the conversation window applies them to the session they name. The conversation
 window keeps every ledger row in memory, since a conversation has no start date. A call that fails after reporting usage is still billed;
@@ -289,7 +301,7 @@ take saved copies for offline runs. Run on 2026-10-28 it matched all 10 rows wit
 | How a local plugin resolves `@deepseek-ai/*` (`file:` vs `link:`) | The runtime resolver (`dsh-app-boot` profile-resolution bootstrap) routes every bare import named in the plugin's own `peerDependencies` to the installation copy, for both profile-layer (`file:`) and linked-root (`link:`) installs. `file:` copies only the packed `files`, never this folder's `node_modules`. Chosen form: `file:`. `link:` is also safe by the same rule, as long as every harness import stays a peer, but was not exercised | Resolver source; with the `file:` install, `appendPluginRecord` succeeded (it uses a private field of the harness `Session` class, which a second module copy would reject) and the agent loop's `instanceof LlmError` matched the plugin's error (headless printed `dsh: BUDGET_UNPRICED_MODEL: …` and `turn/end` carried that code instead of `UNKNOWN`) |
 | Can a plugin add session event types? | Not safely through `SessionEventMap`: the session reader refuses a log holding an event type outside its built-in list unless the event is marked `ignorable`, and `Session.append` cannot set that marker. `appendPluginRecord` writes `plugin:<name>/…` records with `ignorable: true`. The plugin uses those | `dsh-session` `KNOWN_SESSION_EVENT_TYPES` and persistence admission; a scratch session with a `stop` record resumed with `--session-id` |
 | Does a thrown `llm/stream` error get retried? | No. `agent/request-error` (where `llm-retry` acts) only sees `error` finish chunks; a listener throw ends the turn as `error` directly | `dsh-agent-loop` `step()`; offline guard run: no retry, `turn/end {kind: error}` |
-| Which session id each metered call carries (0.2.0, rc.5) | Loop steps: the agent's session. Session titles: the session being titled (`purpose: session-title`). Compaction: the compacted agent's session (`purpose: compaction`). Subagents: dsh-subagent mints a fresh child id (`randomUUID`) and runs the child agent on its own session (header `origin: subagent`, `parentSession`), so its loop calls carry the child id. The plugin's `agent/pre-step` listener also sees child agents: its context has no scope tag, and the scope filter passes such listeners for every agent. Only the experimental auto-review reviewer calls without a session id | Source of `dsh-agent-loop`, `dsh-session-title-llm`, `dsh-compaction-basic`, `dsh-subagent`, `dsh-scope`, `dsh-experimental-auto-review`. The real ledger from 30 October holds two subagent sessions (`57d5c73e…`, `88e33182…`) logged under their own ids, whose headers name `session-5b8f…` as parent |
+| Which session id each metered call carries (0.2.0, rc.5) | Loop steps: the agent's session. Session titles: the session being titled (`purpose: session-title`). Compaction: the compacted agent's session (`purpose: compaction`). Subagents: dsh-subagent mints a fresh child id (`randomUUID`) and runs the child agent on its own session (header `origin: subagent`, `parentSession`), so its loop calls carry the child id; the plugin maps it to the parent through that header. A user fork sets `parentSession` without `origin`. The plugin's `agent/pre-step` listener also sees child agents: its context has no scope tag, and the scope filter passes such listeners for every agent. Only the experimental auto-review reviewer calls without a session id | Source of `dsh-agent-loop`, `dsh-session-title-llm`, `dsh-compaction-basic`, `dsh-subagent`, `dsh-scope`, `dsh-experimental-auto-review`. The real ledger from 30 October holds two subagent sessions (`57d5c73e…`, `88e33182…`) logged under their own ids, whose headers name `session-5b8f…` as parent |
 | Does the composer pill know its conversation? | Yes. `conversation.input.right` is declared `scope: "session"`, and the session scope's built-in standard source gives every entry a `sessionId` prop, although the composer renders the slot with empty owner props. The pill sends it as `?session=` | Source of `dsh-client-ui-conversation`, `dsh-client-ui-renderer`, `dsh-client-ui-session` (rc.5). Not yet seen in a browser with 0.2.0 |
 | Pricing page structure | Static HTML tables plus client-rendered `{priceOf}` cells backed by the public `meteredUnitMaps` feed (prices per 1K tokens, ×1000). DeepSeek-R1 and DeepSeek-V3.1 live in the client-rendered table, which is why a no-JavaScript read missed them | Live page and feed, 2026-10-28 |
 

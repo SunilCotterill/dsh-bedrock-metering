@@ -4,7 +4,10 @@
  * @module dsh-bedrock-metering/budget
  */
 import type { HeldRow, LedgerRow } from './ledger.ts';
-/** `session` is one conversation (one dsh session id); `day` and `month` are calendar windows. */
+/**
+ * `session` is one conversation: a top-level dsh session together with its
+ * subagents' child sessions. `day` and `month` are calendar windows.
+ */
 export type BudgetWindow = 'day' | 'month' | 'session';
 export interface BudgetConfig {
     window: BudgetWindow;
@@ -31,16 +34,17 @@ export declare function calendarEnd(window: 'day' | 'month', now: number): numbe
 /** Adjective used in messages for each window. */
 export declare function windowLabel(window: BudgetWindow): string;
 /**
- * Whether a row counts toward a window. A conversation window counts only its
- * own session's rows, overrides and resets included. Calendar windows count
- * every row except overrides and resets made under a conversation window,
- * which belong to that conversation alone.
+ * Whether a row counts toward a window. A conversation window counts only the
+ * rows of its own conversation (its top-level session and any subagent child
+ * sessions stamped with it), overrides and resets included. Calendar windows
+ * count every row except overrides and resets made under a conversation
+ * window, which belong to that conversation alone.
  * @param row - a ledger row.
  * @param window - window kind.
- * @param session - session id scoping a `session` window.
+ * @param conversation - top-level session id scoping a `session` window.
  * @returns whether the row is in scope.
  */
-export declare function inScope(row: LedgerRow, window: BudgetWindow, session: string | undefined): boolean;
+export declare function inScope(row: LedgerRow, window: BudgetWindow, conversation: string | undefined): boolean;
 /** Token and spend totals for one provider/model route. */
 export interface RouteTotals {
     provider: string;
@@ -60,7 +64,13 @@ export interface WindowSummary {
     start: number;
     /** Epoch ms of the next calendar window, absent for `session`. */
     end?: number;
+    /** Top-level session id a `session` window was scoped to. */
+    conversation?: string;
     spentUsd: number;
+    /** Part of {@link spentUsd} spent in subagent child sessions of the conversation. */
+    subagentUsd: number;
+    /** Subagent child sessions with usage in the conversation. */
+    subagentSessions: number;
     /** Latest active override expiry, epoch ms. */
     overrideUntil?: number;
     refused: number;
@@ -73,10 +83,10 @@ export interface WindowSummary {
  * @param rows - rows in file order (held from at least the window start).
  * @param window - window kind.
  * @param now - epoch ms.
- * @param session - session id, required to scope a `session` window.
+ * @param conversation - top-level session id, required to scope a `session` window.
  * @returns the summary.
  */
-export declare function summarize(rows: readonly HeldRow[], window: BudgetWindow, now: number, session?: string): WindowSummary;
+export declare function summarize(rows: readonly HeldRow[], window: BudgetWindow, now: number, conversation?: string): WindowSummary;
 export interface Verdict {
     /** Spend over limit; `Infinity` when the limit is zero and anything was spent. */
     fraction: number;
@@ -103,12 +113,11 @@ export declare function evaluate(summary: WindowSummary, config: BudgetConfig, n
 export declare class Announcer {
     private readonly announced;
     /**
-     * @param summary - current window (its kind and start form the key).
+     * @param summary - current window (its kind, start and conversation form the key).
      * @param verdict - current verdict.
-     * @param session - session id, part of the key for `session` windows.
      * @returns the threshold to announce now, or undefined when none is new.
      */
-    next(summary: WindowSummary, verdict: Verdict, session?: string): number | undefined;
+    next(summary: WindowSummary, verdict: Verdict): number | undefined;
 }
 /**
  * Render a dollar amount: cents from $1, up to four decimals below $1 so

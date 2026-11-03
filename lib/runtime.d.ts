@@ -47,6 +47,14 @@ export interface RuntimeHost {
 export declare const BUDGET_EXCEEDED = "BUDGET_EXCEEDED";
 /** Stable error code for a metered model without a price under `unpricedModel: block`. */
 export declare const UNPRICED_MODEL = "BUDGET_UNPRICED_MODEL";
+/**
+ * The parent of a subagent child session, read from its immutable header.
+ * A user fork also records `parentSession` but is a conversation of its own,
+ * so only `origin: 'subagent'` sessions roll into their parent.
+ * @param session - a live session.
+ * @returns the parent session id, or undefined for a top-level session.
+ */
+export declare function subagentParent(session: Session): string | undefined;
 export declare class MeteringRuntime {
     readonly config: MeteringConfig;
     readonly host: RuntimeHost;
@@ -66,15 +74,27 @@ export declare class MeteringRuntime {
     agentIsMetered(agent: Agent): boolean;
     /**
      * Refresh the ledger view and evaluate the current window.
-     * @param session - session id scoping the `session` (conversation) window. Without one a
-     *   conversation window sums nothing, so a model call that carries no session id is logged
-     *   but neither counted toward a conversation nor stopped.
+     * @param session - session id scoping the `session` (conversation) window; a subagent's
+     *   child session resolves to its parent conversation. Without one a conversation window
+     *   sums nothing, so a model call that carries no session id is logged but neither counted
+     *   toward a conversation nor stopped.
      * @returns the window summary and verdict.
      */
     current(session?: string): {
         summary: WindowSummary;
         verdict: Verdict;
     };
+    /**
+     * The conversation a session belongs to: the top-level session above any
+     * chain of subagent children. Live sessions are walked through their
+     * headers; a session that is not live is looked up in the ledger, whose
+     * rows record the conversation of every child session.
+     * @param session - session id.
+     * @returns the top-level session id (the session itself when it is top-level).
+     */
+    conversationOf(session: string): string;
+    /** The conversation the ledger last recorded for a child session, if any. */
+    private recordedConversation;
     /**
      * Append one usage row for a finished (or failed) model call, then announce any newly crossed threshold.
      * @param options - the request.
@@ -113,7 +133,7 @@ export declare class MeteringRuntime {
      * @returns the command reply.
      */
     reset(agent: Agent): string;
-    /** Row fields shared by every kind. */
+    /** Row fields shared by every kind; a subagent's rows also name their conversation. */
     private base;
     private append;
     private refuse;

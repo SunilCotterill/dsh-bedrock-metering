@@ -90,6 +90,12 @@ describe('status body', () => {
     assert.match(stopped.tooltip, /Start a new conversation or run \/budget override <minutes>/);
   });
 
+  it('includes subagent spend in the conversation total and says how much', () => {
+    const status = conversationStatus(1, [held(0.5, { session: 'c1', conversation: 's1', attempt: 'child' } as Partial<LedgerRow>)]);
+    assert.equal(status.label, '$1.50');
+    assert.match(status.tooltip, /\nIncludes \$0\.50 from 1 subagent\n/);
+  });
+
   it('notes a conversation /budget reset in the tooltip', () => {
     const reset: HeldRow = {
       at: now - 2000,
@@ -154,7 +160,10 @@ describe('status route', () => {
       handleStatus(conversation, { requestRejection: () => undefined }, { method: 'GET', url } as IncomingMessage, res as unknown as ServerResponse);
       return JSON.parse(res.body) as { label: string; level: string };
     };
-    assert.equal(get('/bedrock-metering/status?session=s1').label, '$1.73');
+    conversation.ledger.append({ ...held(0.27, { session: 'child-of-s1', conversation: 's1' }).row, attempt: 'child' } as LedgerRow);
+    assert.equal(get('/bedrock-metering/status?session=s1').label, '$2.00');
+    // A subagent's session view shows its whole conversation, resolved through the ledger.
+    assert.equal(get('/bedrock-metering/status?session=child-of-s1').label, '$2.00');
     const other = get('/bedrock-metering/status?session=s2');
     assert.equal(other.label, '$49.50');
     assert.equal(other.level, 'critical');

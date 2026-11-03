@@ -6,7 +6,7 @@ import { after, describe, it } from 'node:test';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
-import { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session';
+import { Session, SESSION_FORMAT_VERSION, SessionId, SessionSeq } from '@deepseek-ai/dsh-session';
 import { handleBudgetCommand } from '../src/command.ts';
 import { preStepListener, streamListener } from '../src/hooks.ts';
 import { loadBundledTable } from '../src/pricing.ts';
@@ -30,9 +30,17 @@ function setup(budget: Partial<MeteringConfig['budget']> = {}, meter: Partial<Me
   const errors: string[] = [];
   const injected: unknown[] = [];
   const agents = new Map<string, Agent>();
-  /** A live agent on its own session: another conversation, or a subagent child. */
-  const addAgent = (id: string) => {
-    const session = Session.create(SessionId(id));
+  /**
+   * A live agent on its own session: another conversation, or (with `parent`) a
+   * subagent child whose header names its parent, as dsh-subagent creates it, or
+   * (with `fork`) a user fork, whose header names its source without `origin`.
+   */
+  const addAgent = (id: string, parent?: string, fork = false) => {
+    const header: Parameters<typeof Session.create>[2] = parent === undefined ? undefined : {
+      version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt: 0, isSeeded: false,
+      parentSession: SessionId(parent), ...fork ? {} : { origin: 'subagent' as const, delegationDepth: 1 },
+    };
+    const session = Session.create(SessionId(id), undefined, header);
     const agent = {
       id: session.id,
       session,
@@ -60,7 +68,7 @@ function setup(budget: Partial<MeteringConfig['budget']> = {}, meter: Partial<Me
   const records = (of: Session = session) => [...Array(of.seq).keys()]
     .map((seq) => of.eventAt(SessionSeq(seq)) as { type: string; ignorable?: true; data: unknown } | undefined)
     .filter((event) => event?.type.startsWith('plugin:'));
-  return { runtime, agent, session, clock, stderr, errors, injected, ledgerRows, records, addAgent };
+  return { runtime, agent, session, clock, stderr, errors, injected, ledgerRows, records, addAgent, agents };
 }
 
 function request(extra: Partial<GenerateOptions> = {}): GenerateOptions {
@@ -278,15 +286,63 @@ describe('conversation window', () => {
     assert.deepEqual(ledgerRows().filter((row) => row.kind === 'refused').map((row) => row.session), ['session-test', 'session-test']);
   });
 
-  it('counts a subagent toward its own conversation, not its parent', async () => {
-    const { runtime, agent, addAgent } = setup({ limitUsd: 0.04 });
+  it('rolls a subagent\'s spend into its parent conversation and stops both together', async () => {
+    const { runtime, agent, addAgent, ledgerRows } = setup({ limitUsd: 0.08 });
+    const other = addAgent('session-other');
     // A subagent runs on a child session with a fresh id (dsh-subagent mints it with randomUUID).
-    const child = addAgent('57d5c73e-7b19-4865-8288-1992077d7d75');
+    const child = addAgent('57d5c73e-7b19-4865-8288-1992077d7d75', 'session-test');
+    await spend(runtime, 'session-test');
+    assert.equal(runtime.gate(child, 1, 1), false);
     await spend(runtime, child.session.id);
+    const childRow = ledgerRows().at(-1);
+    assert.equal(childRow.session, child.session.id);
+    assert.equal(childRow.conversation, 'session-test');
+    assert.equal(ledgerRows()[0].conversation, undefined);
+    assert.equal(runtime.gate(agent, 2, 1), true);
     assert.equal(runtime.gate(child, 1, 2), true);
+    assert.equal(refusedFor(runtime, { sessionId: child.session.id }), true);
+    assert.equal(runtime.gate(other, 1, 1), false);
+    const status = handleBudgetCommand(runtime, { agent, rawInput: '' }).text ?? '';
+    assert.match(status, /Spent \$0\.09 of \$0\.08/);
+    assert.match(status, /Includes \$0\.045 spent by 1 subagent session of this conversation\./);
+    assert.equal(handleBudgetCommand(runtime, { agent: child, rawInput: '' }).text, status);
+  });
+
+  it('resolves nested subagents to the top-level conversation, live or from the ledger', async () => {
+    const { runtime, addAgent, agents, ledgerRows } = setup();
+    addAgent('child', 'session-test');
+    addAgent('grandchild', 'child');
+    assert.equal(runtime.conversationOf('grandchild'), 'session-test');
+    await spend(runtime, 'grandchild');
+    assert.equal(ledgerRows().at(-1).conversation, 'session-test');
+    // Once the child sessions are disposed, the ledger still knows their conversation.
+    agents.delete('child');
+    agents.delete('grandchild');
+    assert.equal(runtime.conversationOf('grandchild'), 'session-test');
+    assert.equal(runtime.conversationOf('child'), 'child');
+  });
+
+  it('keeps a user fork as a conversation of its own', () => {
+    const { runtime, addAgent } = setup();
+    addAgent('fork', 'session-test', true);
+    assert.equal(runtime.conversationOf('fork'), 'fork');
+  });
+
+  it('announces a threshold once per conversation, subagents included', async () => {
+    const { runtime, addAgent, stderr } = setup({ limitUsd: 0.1, warnAt: [0.4] });
+    addAgent('child', 'session-test');
+    await spend(runtime, 'session-test');
+    await spend(runtime, 'child');
+    assert.deepEqual(stderr, ['dsh: budget: 45% of $0.10 conversation limit used ($0.045)']);
+  });
+
+  it('lets an override typed in a subagent session lift its whole conversation', async () => {
+    const { runtime, agent, addAgent, ledgerRows } = setup({ limitUsd: 0.04 });
+    const child = addAgent('child', 'session-test');
+    await spend(runtime, 'child');
+    assert.equal(handleBudgetCommand(runtime, { agent: child, rawInput: 'override 10' }).kind, 'success');
+    assert.equal(ledgerRows().at(-1).conversation, 'session-test');
     assert.equal(runtime.gate(agent, 2, 1), false);
-    assert.match(handleBudgetCommand(runtime, { agent, rawInput: '' }).text ?? '', /Spent \$0\.00 of \$0\.04/);
-    assert.match(handleBudgetCommand(runtime, { agent: child, rawInput: '' }).text ?? '', /Spent \$0\.045 of \$0\.04/);
   });
 
   it('warns each conversation once as it crosses a threshold', async () => {

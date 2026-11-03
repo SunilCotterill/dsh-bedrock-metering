@@ -40,8 +40,8 @@ export const Config: z<Config> = z.object({
     .description('Shared append-only JSONL ledger for every dsh home and process.'),
   budget: z.object({
     window: z.union(['day', 'month', 'session']).default('session')
-      .description('Budget window: session is one conversation (one dsh session; a subagent has its own); day and month start at local midnight.'),
-    limitUsd: z.number().min(0).default(50).description('Spend limit in USD for one window (one conversation by default).'),
+      .description('Budget window: session is one conversation (a dsh session together with its subagents); day and month start at local midnight.'),
+    limitUsd: z.number().min(0).default(300).description('Spend limit in USD for one window (one conversation by default).'),
     warnAt: z.array(z.number().min(0)).default([0.8, 0.95]).description('Fractions of limitUsd that each warn once per window.'),
     stopAt: z.number().min(0).default(1).description('Fraction of limitUsd at which the agent stops.'),
   }),

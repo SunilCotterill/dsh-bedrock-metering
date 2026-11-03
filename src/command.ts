@@ -65,6 +65,9 @@ export function statusText(runtime: MeteringRuntime, session: string): string {
     `Spent ${formatUsd(summary.spentUsd)} of ${formatUsd(budget.limitUsd)} (${formatPercent(verdict.fraction)}); ` +
       `warn at ${budget.warnAt.map(formatPercent).join(', ') || 'never'}; stop at ${formatPercent(budget.stopAt)}.`,
   );
+  if (summary.subagentSessions > 0) {
+    lines.push(`Includes ${formatUsd(summary.subagentUsd)} spent by ${summary.subagentSessions} subagent session${summary.subagentSessions === 1 ? '' : 's'} of this conversation.`);
+  }
   if (summary.overrideUntil !== undefined) lines.push(`Override active until ${formatLocal(summary.overrideUntil)}.`);
   if (verdict.stop) {
     lines.push(conversation

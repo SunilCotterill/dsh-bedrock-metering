@@ -5,7 +5,10 @@
  */
 import type { HeldRow, LedgerRow, UsageRow } from './ledger.ts';
 
-/** `session` is one conversation (one dsh session id); `day` and `month` are calendar windows. */
+/**
+ * `session` is one conversation: a top-level dsh session together with its
+ * subagents' child sessions. `day` and `month` are calendar windows.
+ */
 export type BudgetWindow = 'day' | 'month' | 'session';
 
 export interface BudgetConfig {
@@ -49,17 +52,18 @@ export function windowLabel(window: BudgetWindow): string {
 }
 
 /**
- * Whether a row counts toward a window. A conversation window counts only its
- * own session's rows, overrides and resets included. Calendar windows count
- * every row except overrides and resets made under a conversation window,
- * which belong to that conversation alone.
+ * Whether a row counts toward a window. A conversation window counts only the
+ * rows of its own conversation (its top-level session and any subagent child
+ * sessions stamped with it), overrides and resets included. Calendar windows
+ * count every row except overrides and resets made under a conversation
+ * window, which belong to that conversation alone.
  * @param row - a ledger row.
  * @param window - window kind.
- * @param session - session id scoping a `session` window.
+ * @param conversation - top-level session id scoping a `session` window.
  * @returns whether the row is in scope.
  */
-export function inScope(row: LedgerRow, window: BudgetWindow, session: string | undefined): boolean {
-  if (window === 'session') return session !== undefined && row.session === session;
+export function inScope(row: LedgerRow, window: BudgetWindow, conversation: string | undefined): boolean {
+  if (window === 'session') return conversation !== undefined && (row.conversation ?? row.session) === conversation;
   return !((row.kind === 'override' || row.kind === 'reset') && row.window === 'session');
 }
 
@@ -83,7 +87,13 @@ export interface WindowSummary {
   start: number;
   /** Epoch ms of the next calendar window, absent for `session`. */
   end?: number;
+  /** Top-level session id a `session` window was scoped to. */
+  conversation?: string;
   spentUsd: number;
+  /** Part of {@link spentUsd} spent in subagent child sessions of the conversation. */
+  subagentUsd: number;
+  /** Subagent child sessions with usage in the conversation. */
+  subagentSessions: number;
   /** Latest active override expiry, epoch ms. */
   overrideUntil?: number;
   refused: number;
@@ -97,39 +107,48 @@ export interface WindowSummary {
  * @param rows - rows in file order (held from at least the window start).
  * @param window - window kind.
  * @param now - epoch ms.
- * @param session - session id, required to scope a `session` window.
+ * @param conversation - top-level session id, required to scope a `session` window.
  * @returns the summary.
  */
-export function summarize(rows: readonly HeldRow[], window: BudgetWindow, now: number, session?: string): WindowSummary {
+export function summarize(rows: readonly HeldRow[], window: BudgetWindow, now: number, conversation?: string): WindowSummary {
   const calendar = window === 'session' ? undefined : window;
   let start = calendar === undefined ? Number.NEGATIVE_INFINITY : calendarStart(calendar, now);
   for (const { at, row } of rows) {
-    if (row.kind === 'reset' && at >= start && at <= now && inScope(row, window, session)) start = at;
+    if (row.kind === 'reset' && at >= start && at <= now && inScope(row, window, conversation)) start = at;
   }
   let spentUsd = 0;
+  let subagentUsd = 0;
+  const subagents = new Set<string>();
   let overrideUntil: number | undefined;
   let refused = 0;
   let unpricedCalls = 0;
   const routes = new Map<string, RouteTotals>();
   for (const { at, row } of rows) {
     if (row.kind === 'override') {
-      if (!inScope(row, window, session)) continue;
+      if (!inScope(row, window, conversation)) continue;
       const until = Date.parse(row.until);
       if (at <= now && until > now && (overrideUntil === undefined || until > overrideUntil)) overrideUntil = until;
       continue;
     }
-    if (at < start || at > now || !inScope(row, window, session)) continue;
+    if (at < start || at > now || !inScope(row, window, conversation)) continue;
     if (row.kind === 'refused') refused++;
     if (row.kind !== 'usage') continue;
     addRoute(routes, row);
     spentUsd += row.usd;
     if (row.metered && !row.priced) unpricedCalls++;
+    if (calendar === undefined && row.session !== undefined && row.session !== conversation) {
+      subagentUsd += row.usd;
+      subagents.add(row.session);
+    }
   }
   return {
     window,
     start,
     ...calendar === undefined ? {} : { end: calendarEnd(calendar, now) },
+    ...calendar === undefined && conversation !== undefined ? { conversation } : {},
     spentUsd,
+    subagentUsd,
+    subagentSessions: subagents.size,
     ...overrideUntil === undefined ? {} : { overrideUntil },
     refused,
     routes: [...routes.values()].sort((a, b) => b.usd - a.usd || b.calls - a.calls),
@@ -189,14 +208,13 @@ export class Announcer {
   private readonly announced = new Map<string, number>();
 
   /**
-   * @param summary - current window (its kind and start form the key).
+   * @param summary - current window (its kind, start and conversation form the key).
    * @param verdict - current verdict.
-   * @param session - session id, part of the key for `session` windows.
    * @returns the threshold to announce now, or undefined when none is new.
    */
-  next(summary: WindowSummary, verdict: Verdict, session?: string): number | undefined {
+  next(summary: WindowSummary, verdict: Verdict): number | undefined {
     if (verdict.warnLevel === undefined) return undefined;
-    const key = `${summary.window}:${summary.start}:${summary.window === 'session' ? session ?? '' : ''}`;
+    const key = `${summary.window}:${summary.start}:${summary.conversation ?? ''}`;
     const previous = this.announced.get(key);
     if (previous !== undefined && previous >= verdict.warnLevel) return undefined;
     this.announced.set(key, verdict.warnLevel);
