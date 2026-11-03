@@ -66,7 +66,9 @@ export declare class MeteringRuntime {
     agentIsMetered(agent: Agent): boolean;
     /**
      * Refresh the ledger view and evaluate the current window.
-     * @param session - session id, used by the `session` window.
+     * @param session - session id scoping the `session` (conversation) window. Without one a
+     *   conversation window sums nothing, so a model call that carries no session id is logged
+     *   but neither counted toward a conversation nor stopped.
      * @returns the window summary and verdict.
      */
     current(session?: string): {
@@ -100,12 +102,14 @@ export declare class MeteringRuntime {
     /** Announce a newly crossed warning threshold once per window in this process. */
     announce(agent: Agent | undefined, sessionId: string | undefined, summary: WindowSummary, verdict: Verdict): void;
     /**
-     * `/budget override <minutes>`: lift the stop for every process sharing the ledger.
+     * `/budget override <minutes>`: lift the stop for this conversation (conversation
+     * window) or for every process sharing the ledger (calendar windows).
      * @returns the command reply.
      */
     override(agent: Agent, minutes: number): string;
     /**
-     * `/budget reset`: start a fresh window now (for mistakes only).
+     * `/budget reset`: restart this conversation's count (conversation window) or
+     * start a fresh calendar window now. For mistakes only.
      * @returns the command reply.
      */
     reset(agent: Agent): string;

@@ -14,6 +14,7 @@ import { MeteringRuntime } from '../src/runtime.ts';
 import { budgetStatus, handleStatus, statusLevel } from '../src/web.ts';
 
 const daily: BudgetConfig = { window: 'day', limitUsd: 50, warnAt: [0.8, 0.95], stopAt: 1 };
+const perConversation: BudgetConfig = { ...daily, window: 'session' };
 const now = new Date(2026, 9, 30, 12, 0).getTime();
 
 function held(usd: number, extra: Partial<LedgerRow> = {}): HeldRow {
@@ -30,6 +31,11 @@ function held(usd: number, extra: Partial<LedgerRow> = {}): HeldRow {
 function statusFor(usd: number, config = daily, rows: HeldRow[] = []) {
   const summary = summarize([held(usd), ...rows], config.window, now);
   return budgetStatus(summary, evaluate(summary, config, now), config);
+}
+
+function conversationStatus(usd: number, rows: HeldRow[] = []) {
+  const summary = summarize([held(usd, { session: 's1' }), ...rows], 'session', now, 's1');
+  return budgetStatus(summary, evaluate(summary, perConversation, now), perConversation);
 }
 
 describe('status colour bands', () => {
@@ -63,9 +69,38 @@ describe('status colour bands', () => {
 });
 
 describe('status body', () => {
-  it('carries the pill label, a clamped bar and a tooltip', () => {
+  it('shows the conversation total as the label, with bar and tooltip against its limit', () => {
+    const status = conversationStatus(1.23);
+    assert.equal(status.label, '$1.23');
+    assert.equal(status.level, 'ok');
+    assert.equal(status.bar, 0.0246);
+    assert.equal(status.window, 'session');
+    assert.equal(status.spentUsd, 1.23);
+    assert.equal(status.limitUsd, 50);
+    assert.equal(status.resetsAt, undefined);
+    assert.deepEqual(status.tooltip.split('\n'), ['$1.23 of $50.00 Bedrock budget for this conversation (2%)', 'Warns at 80%, 95%; stops at 100%']);
+  });
+
+  it('colours a conversation by its own spend and says how to continue when stopped', () => {
+    assert.equal(conversationStatus(40).level, 'warn');
+    assert.equal(conversationStatus(47.5).level, 'critical');
+    const stopped = conversationStatus(50.12);
+    assert.equal(stopped.label, '$50.12 · stopped');
+    assert.equal(stopped.bar, 1);
+    assert.match(stopped.tooltip, /Start a new conversation or run \/budget override <minutes>/);
+  });
+
+  it('notes a conversation /budget reset in the tooltip', () => {
+    const reset: HeldRow = {
+      at: now - 2000,
+      row: { v: 1, kind: 'reset', ts: new Date(now - 2000).toISOString(), home: '/h', profile: 'web', session: 's1', window: 'session' },
+    };
+    assert.match(conversationStatus(1, [reset]).tooltip, /Counted since the \/budget reset at 2026-10-30 11:59/);
+  });
+
+  it('carries the window spend as the label, a clamped bar and a tooltip for a daily window', () => {
     const status = statusFor(12.3);
-    assert.equal(status.label, 'Bedrock 24%');
+    assert.equal(status.label, '$12.30');
     assert.equal(status.bar, 0.246);
     assert.equal(status.tooltip.split('\n')[0], '$12.30 of $50.00 daily Bedrock budget (24%)');
     assert.match(status.tooltip, /Resets 2026-10-31 00:00/);
@@ -76,7 +111,7 @@ describe('status body', () => {
 
   it('says stopped and how to continue', () => {
     const status = statusFor(51);
-    assert.equal(status.label, 'Bedrock stopped');
+    assert.equal(status.label, '$51.00 · stopped');
     assert.match(status.tooltip, /\/budget override <minutes>/);
   });
 });
@@ -106,7 +141,24 @@ describe('status route', () => {
     const res = call('GET');
     assert.equal(res.statusCode, 200);
     assert.equal(res.headers['cache-control'], 'no-store');
-    assert.equal(JSON.parse(res.body).label, 'Bedrock 0%');
+    assert.equal(JSON.parse(res.body).label, '$0.00');
+  });
+
+  it('scopes a conversation window to the ?session= the pill sends', () => {
+    const conversation = new MeteringRuntime({ ...runtime.config, ledgerPath: join(dir, 'conversation.jsonl'), budget: perConversation }, runtime.host, loadBundledTable());
+    for (const [session, usd] of [['s1', 1.23], ['s2', 49.5], ['s1', 0.5]] as const) {
+      conversation.ledger.append({ ...held(usd, { session }).row, attempt: `${session}-${usd}` } as LedgerRow);
+    }
+    const get = (url: string) => {
+      const res = { statusCode: 0, body: '', setHeader: () => {}, end: (body = '') => { res.body = body; } };
+      handleStatus(conversation, { requestRejection: () => undefined }, { method: 'GET', url } as IncomingMessage, res as unknown as ServerResponse);
+      return JSON.parse(res.body) as { label: string; level: string };
+    };
+    assert.equal(get('/bedrock-metering/status?session=s1').label, '$1.73');
+    const other = get('/bedrock-metering/status?session=s2');
+    assert.equal(other.label, '$49.50');
+    assert.equal(other.level, 'critical');
+    assert.equal(get('/bedrock-metering/status').label, '$0.00');
   });
 
   it('answers untrusted requests with the fence status and no body', () => {
@@ -155,10 +207,16 @@ describe('client bundle', () => {
     const style = pill.props?.['style'] as Record<string, unknown>;
     assert.equal(pill.props?.['data-level'], 'critical');
     assert.equal(style['color'], '#dc2626');
-    assert.equal((pill.children[0] as Element).children[0], 'Bedrock 95%');
+    assert.equal((pill.children[0] as Element).children[0], '$47.50');
     const bar = (pill.children[1] as Element).children[0] as Element;
     assert.equal((bar.props?.['style'] as Record<string, unknown>)['width'], '95%');
     assert.equal(pill.props?.['title'], statusFor(47.5).tooltip);
+  });
+
+  it('renders the conversation total as the pill text', () => {
+    const pill = exports['pillElement'](conversationStatus(1.23)) as Element;
+    assert.equal((pill.children[0] as Element).children[0], '$1.23');
+    assert.equal(pill.props?.['aria-label'], '$1.23 of $50.00 Bedrock budget for this conversation (2%)');
   });
 
   it('stays neutral below the first threshold', () => {

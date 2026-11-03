@@ -11,7 +11,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand';
 import type { SessionId } from '@deepseek-ai/dsh-session';
 import z from '@deepseek-ai/schemastery';
-import { handleBudgetCommand } from './command.ts';
+import { commandDescription, handleBudgetCommand } from './command.ts';
 import { preStepListener, streamListener } from './hooks.ts';
 import { loadBundledTable } from './pricing.ts';
 import { MeteringRuntime } from './runtime.ts';
@@ -39,8 +39,9 @@ export const Config: z<Config> = z.object({
   ledgerPath: z.string().default('~/.dsh-bedrock-metering/ledger.jsonl')
     .description('Shared append-only JSONL ledger for every dsh home and process.'),
   budget: z.object({
-    window: z.union(['day', 'month', 'session']).default('day').description('Budget window; day and month start at local midnight.'),
-    limitUsd: z.number().min(0).default(300).description('Spend limit in USD for one window.'),
+    window: z.union(['day', 'month', 'session']).default('session')
+      .description('Budget window: session is one conversation (one dsh session; a subagent has its own); day and month start at local midnight.'),
+    limitUsd: z.number().min(0).default(50).description('Spend limit in USD for one window (one conversation by default).'),
     warnAt: z.array(z.number().min(0)).default([0.8, 0.95]).description('Fractions of limitUsd that each warn once per window.'),
     stopAt: z.number().min(0).default(1).description('Fraction of limitUsd at which the agent stops.'),
   }),
@@ -97,7 +98,7 @@ export function apply(ctx: Context, config: Config): void {
     commandsCtx.commands.register({
       definitionId: CommandDefinitionId('dsh-bedrock-metering/budget'),
       name: 'budget',
-      description: 'Bedrock spend against the budget; override a stop or reset the window',
+      description: commandDescription(config.budget.window),
       input: { hint: 'status | override <minutes> | reset' },
       handler: (invocation) => handleBudgetCommand(runtime, invocation),
     });

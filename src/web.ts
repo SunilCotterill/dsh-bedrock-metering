@@ -22,7 +22,7 @@ export interface BudgetStatus {
   level: StatusLevel;
   /** Spend over limit, clamped to [0, 1] for the bar. */
   bar: number;
-  /** Short pill text, e.g. `Bedrock 24%`. */
+  /** Short pill text: dollars spent in the window, e.g. `$1.23`, or `$50.12 · stopped`. */
   label: string;
   /** Multi-line hover text. */
   tooltip: string;
@@ -60,14 +60,21 @@ export function statusLevel(verdict: Verdict, config: BudgetConfig): StatusLevel
 export function budgetStatus(summary: WindowSummary, verdict: Verdict, config: BudgetConfig): BudgetStatus {
   const level = statusLevel(verdict, config);
   const percent = formatPercent(verdict.fraction);
-  const label = level === 'stopped' ? 'Bedrock stopped' : `Bedrock ${percent}`;
-  const lines = [
-    `${formatUsd(summary.spentUsd)} of ${formatUsd(config.limitUsd)} ${windowLabel(config.window)} Bedrock budget (${percent})`,
-  ];
+  const spent = formatUsd(summary.spentUsd);
+  const conversation = config.window === 'session';
+  const label = level === 'stopped' ? `${spent} · stopped` : spent;
+  const lines = [conversation
+    ? `${spent} of ${formatUsd(config.limitUsd)} Bedrock budget for this conversation (${percent})`
+    : `${spent} of ${formatUsd(config.limitUsd)} ${windowLabel(config.window)} Bedrock budget (${percent})`];
   if (summary.end !== undefined) lines.push(`Resets ${formatLocal(summary.end)}`);
+  if (conversation && Number.isFinite(summary.start)) lines.push(`Counted since the /budget reset at ${formatLocal(summary.start)}`);
   if (config.warnAt.length > 0) lines.push(`Warns at ${config.warnAt.map(formatPercent).join(', ')}; stops at ${formatPercent(config.stopAt)}`);
   if (summary.overrideUntil !== undefined) lines.push(`Override active until ${formatLocal(summary.overrideUntil)}`);
-  if (level === 'stopped') lines.push('Model calls are refused. Run /budget override <minutes> to continue.');
+  if (level === 'stopped') {
+    lines.push(conversation
+      ? 'Model calls in this conversation are refused. Start a new conversation or run /budget override <minutes> to continue.'
+      : 'Model calls are refused. Run /budget override <minutes> to continue.');
+  }
   return {
     v: 1,
     level,

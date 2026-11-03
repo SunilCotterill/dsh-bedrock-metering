@@ -3,8 +3,9 @@
  * state. Pure: every function takes the clock as an argument.
  * @module dsh-bedrock-metering/budget
  */
-import type { HeldRow, UsageRow } from './ledger.ts';
+import type { HeldRow, LedgerRow, UsageRow } from './ledger.ts';
 
+/** `session` is one conversation (one dsh session id); `day` and `month` are calendar windows. */
 export type BudgetWindow = 'day' | 'month' | 'session';
 
 export interface BudgetConfig {
@@ -44,7 +45,22 @@ export function calendarEnd(window: 'day' | 'month', now: number): number {
 
 /** Adjective used in messages for each window. */
 export function windowLabel(window: BudgetWindow): string {
-  return window === 'day' ? 'daily' : window === 'month' ? 'monthly' : 'session';
+  return window === 'day' ? 'daily' : window === 'month' ? 'monthly' : 'conversation';
+}
+
+/**
+ * Whether a row counts toward a window. A conversation window counts only its
+ * own session's rows, overrides and resets included. Calendar windows count
+ * every row except overrides and resets made under a conversation window,
+ * which belong to that conversation alone.
+ * @param row - a ledger row.
+ * @param window - window kind.
+ * @param session - session id scoping a `session` window.
+ * @returns whether the row is in scope.
+ */
+export function inScope(row: LedgerRow, window: BudgetWindow, session: string | undefined): boolean {
+  if (window === 'session') return session !== undefined && row.session === session;
+  return !((row.kind === 'override' || row.kind === 'reset') && row.window === 'session');
 }
 
 /** Token and spend totals for one provider/model route. */
@@ -63,7 +79,7 @@ export interface RouteTotals {
 /** Everything the gate, guard and `/budget status` need about the current window. */
 export interface WindowSummary {
   window: BudgetWindow;
-  /** Epoch ms; a `/budget reset` inside the calendar window moves it forward. */
+  /** Epoch ms (`-Infinity` for a conversation never reset); a `/budget reset` in the window moves it forward. */
   start: number;
   /** Epoch ms of the next calendar window, absent for `session`. */
   end?: number;
@@ -87,9 +103,8 @@ export interface WindowSummary {
 export function summarize(rows: readonly HeldRow[], window: BudgetWindow, now: number, session?: string): WindowSummary {
   const calendar = window === 'session' ? undefined : window;
   let start = calendar === undefined ? Number.NEGATIVE_INFINITY : calendarStart(calendar, now);
-  const inScope = (row: { session?: string }) => window !== 'session' || (session !== undefined && row.session === session);
   for (const { at, row } of rows) {
-    if (row.kind === 'reset' && at >= start && at <= now && inScope(row)) start = at;
+    if (row.kind === 'reset' && at >= start && at <= now && inScope(row, window, session)) start = at;
   }
   let spentUsd = 0;
   let overrideUntil: number | undefined;
@@ -98,11 +113,12 @@ export function summarize(rows: readonly HeldRow[], window: BudgetWindow, now: n
   const routes = new Map<string, RouteTotals>();
   for (const { at, row } of rows) {
     if (row.kind === 'override') {
+      if (!inScope(row, window, session)) continue;
       const until = Date.parse(row.until);
       if (at <= now && until > now && (overrideUntil === undefined || until > overrideUntil)) overrideUntil = until;
       continue;
     }
-    if (at < start || at > now || !inScope(row)) continue;
+    if (at < start || at > now || !inScope(row, window, session)) continue;
     if (row.kind === 'refused') refused++;
     if (row.kind !== 'usage') continue;
     addRoute(routes, row);
@@ -214,14 +230,18 @@ export function formatLocal(at: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** One-line warning, e.g. `82% of $50.00 daily limit used ($41.10)`. */
+/** One-line warning, e.g. `82% of $50.00 conversation limit used ($41.10)`. */
 export function warningText(summary: WindowSummary, verdict: Verdict, config: BudgetConfig): string {
   return `${formatPercent(verdict.fraction)} of ${formatUsd(config.limitUsd)} ${windowLabel(config.window)} limit used (${formatUsd(summary.spentUsd)})`;
 }
 
 /** One-line stop explanation with the ways out. */
 export function stopText(summary: WindowSummary, config: BudgetConfig): string {
-  const resets = summary.end === undefined ? 'this session stays stopped' : `the window resets at ${formatLocal(summary.end)} local time`;
-  return `stopped: ${formatUsd(summary.spentUsd)} of ${formatUsd(config.limitUsd)} ${windowLabel(config.window)} Bedrock budget used; ${resets}. ` +
+  const used = `stopped: ${formatUsd(summary.spentUsd)} of ${formatUsd(config.limitUsd)} ${windowLabel(config.window)} Bedrock budget used`;
+  if (summary.end === undefined) {
+    return `${used}; this conversation stays stopped. ` +
+      'Start a new conversation, run /budget override <minutes> in this one in the web UI, or raise budget.limitUsd in the profile patch to continue.';
+  }
+  return `${used}; the window resets at ${formatLocal(summary.end)} local time. ` +
     'Run /budget override <minutes> in the web UI or raise budget.limitUsd in the profile patch to continue.';
 }

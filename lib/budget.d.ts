@@ -3,7 +3,8 @@
  * state. Pure: every function takes the clock as an argument.
  * @module dsh-bedrock-metering/budget
  */
-import type { HeldRow } from './ledger.ts';
+import type { HeldRow, LedgerRow } from './ledger.ts';
+/** `session` is one conversation (one dsh session id); `day` and `month` are calendar windows. */
 export type BudgetWindow = 'day' | 'month' | 'session';
 export interface BudgetConfig {
     window: BudgetWindow;
@@ -29,6 +30,17 @@ export declare function calendarStart(window: 'day' | 'month', now: number): num
 export declare function calendarEnd(window: 'day' | 'month', now: number): number;
 /** Adjective used in messages for each window. */
 export declare function windowLabel(window: BudgetWindow): string;
+/**
+ * Whether a row counts toward a window. A conversation window counts only its
+ * own session's rows, overrides and resets included. Calendar windows count
+ * every row except overrides and resets made under a conversation window,
+ * which belong to that conversation alone.
+ * @param row - a ledger row.
+ * @param window - window kind.
+ * @param session - session id scoping a `session` window.
+ * @returns whether the row is in scope.
+ */
+export declare function inScope(row: LedgerRow, window: BudgetWindow, session: string | undefined): boolean;
 /** Token and spend totals for one provider/model route. */
 export interface RouteTotals {
     provider: string;
@@ -44,7 +56,7 @@ export interface RouteTotals {
 /** Everything the gate, guard and `/budget status` need about the current window. */
 export interface WindowSummary {
     window: BudgetWindow;
-    /** Epoch ms; a `/budget reset` inside the calendar window moves it forward. */
+    /** Epoch ms (`-Infinity` for a conversation never reset); a `/budget reset` in the window moves it forward. */
     start: number;
     /** Epoch ms of the next calendar window, absent for `session`. */
     end?: number;
@@ -109,7 +121,7 @@ export declare function formatUsd(value: number): string;
 export declare function formatPercent(fraction: number): string;
 /** Local `YYYY-MM-DD HH:MM` for messages. */
 export declare function formatLocal(at: number): string;
-/** One-line warning, e.g. `82% of $50.00 daily limit used ($41.10)`. */
+/** One-line warning, e.g. `82% of $50.00 conversation limit used ($41.10)`. */
 export declare function warningText(summary: WindowSummary, verdict: Verdict, config: BudgetConfig): string;
 /** One-line stop explanation with the ways out. */
 export declare function stopText(summary: WindowSummary, config: BudgetConfig): string;

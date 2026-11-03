@@ -2,7 +2,9 @@
 // (`conversation.input.right`). Hand-written in the dsh client module format
 // (`window.__ModuleLoader__.load({ id, factory })`, React supplied by the shell)
 // so the package needs no bundler. The host's /bedrock-metering/status route
-// supplies the text, colour band and bar fraction; this file only renders and polls.
+// supplies the text (dollars spent in this conversation by default), colour band
+// and bar fraction; this file only renders and polls. The slot is session-scoped,
+// so the renderer passes the conversation's `sessionId` as a standard prop.
 window.__ModuleLoader__.load({
   id: 'dsh-bedrock-metering',
   factory: (require) => {
@@ -29,7 +31,7 @@ window.__ModuleLoader__.load({
         'data-level': status.level,
         style: {
           display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 8px', borderRadius: 999,
-          fontSize: 12, lineHeight: '18px', whiteSpace: 'nowrap', cursor: 'default',
+          fontSize: 12, lineHeight: '18px', whiteSpace: 'nowrap', cursor: 'default', fontVariantNumeric: 'tabular-nums',
           color: color ?? 'inherit', opacity: color === null ? 0.7 : 1,
           border: `1px solid ${color ?? 'rgba(127, 127, 127, 0.35)'}`,
         },

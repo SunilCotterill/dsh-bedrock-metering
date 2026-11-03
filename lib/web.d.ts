@@ -18,7 +18,7 @@ export interface BudgetStatus {
     level: StatusLevel;
     /** Spend over limit, clamped to [0, 1] for the bar. */
     bar: number;
-    /** Short pill text, e.g. `Bedrock 24%`. */
+    /** Short pill text: dollars spent in the window, e.g. `$1.23`, or `$50.12 · stopped`. */
     label: string;
     /** Multi-line hover text. */
     tooltip: string;

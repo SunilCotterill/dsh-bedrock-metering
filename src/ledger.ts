@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, mkdirSync, openSync, readSync, statSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
+import type { BudgetWindow } from './budget.ts';
 
 /** Fields every row carries. */
 interface RowBase {
@@ -52,16 +53,26 @@ export interface RefusedRow extends RowBase {
   model: string;
 }
 
-/** `/budget override <minutes>`: lifts the stop until `until` for every process. */
+/**
+ * `/budget override <minutes>`: lifts the stop until `until` for every process.
+ * Made under a conversation window (`window: 'session'`), it applies to its own session only.
+ */
 export interface OverrideRow extends RowBase {
   kind: 'override';
   until: string;
   minutes: number;
+  /** Window the override was made under; absent on rows from 0.1.x, which apply to every window. */
+  window?: BudgetWindow;
 }
 
-/** `/budget reset`: starts a fresh window at `ts` for every process. */
+/**
+ * `/budget reset`: starts a fresh window at `ts` for every process.
+ * Made under a conversation window (`window: 'session'`), it restarts its own session's count only.
+ */
 export interface ResetRow extends RowBase {
   kind: 'reset';
+  /** Window the reset was made under; absent on rows from 0.1.x. */
+  window?: BudgetWindow;
 }
 
 export type LedgerRow = UsageRow | RefusedRow | OverrideRow | ResetRow;

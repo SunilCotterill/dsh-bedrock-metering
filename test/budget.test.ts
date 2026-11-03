@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-  Announcer, calendarEnd, calendarStart, evaluate, formatUsd, stopText, summarize, warningText,
+  Announcer, calendarEnd, calendarStart, evaluate, formatUsd, stopText, summarize, warningText, windowLabel,
 } from '../src/budget.ts';
 import type { BudgetConfig } from '../src/budget.ts';
 import type { HeldRow, LedgerRow } from '../src/ledger.ts';
 
 const local = (y: number, m: number, d: number, h = 0, min = 0) => new Date(y, m - 1, d, h, min).getTime();
 const daily: BudgetConfig = { window: 'day', limitUsd: 50, warnAt: [0.8, 0.95], stopAt: 1 };
+const perConversation: BudgetConfig = { ...daily, window: 'session' };
 
 let attempt = 0;
 function usage(at: number, usd: number, extra: Partial<LedgerRow> = {}): HeldRow {
@@ -78,6 +79,98 @@ describe('windows', () => {
     assert.equal(summary.routes[0]?.in, 20);
     assert.equal(summary.routes.length, 3);
     assert.equal(summary.unpricedCalls, 1);
+  });
+});
+
+describe('conversation window', () => {
+  const now = local(2026, 11, 3, 12);
+  const s1 = { session: 's1' } as Partial<LedgerRow>;
+  const s2 = { session: 's2' } as Partial<LedgerRow>;
+
+  it('is labelled as a conversation', () => {
+    assert.equal(windowLabel('session'), 'conversation');
+  });
+
+  it('sums a conversation across calendar days, with its own routes and refusals', () => {
+    const rows = [
+      usage(local(2026, 10, 30, 9), 4, s1),
+      usage(local(2026, 11, 3, 11), 1.25, { ...s1, purpose: 'session-title' }),
+      usage(local(2026, 11, 3, 11, 30), 7, s2),
+      control(local(2026, 11, 3, 11, 45), { kind: 'refused', attempt: 'r1', provider: 'amazon-bedrock', model: 'm', session: 's2' } as Partial<LedgerRow>),
+    ];
+    const summary = summarize(rows, 'session', now, 's1');
+    assert.equal(summary.spentUsd, 5.25);
+    assert.equal(summary.start, Number.NEGATIVE_INFINITY);
+    assert.equal(summary.end, undefined);
+    assert.equal(summary.routes[0]?.calls, 2);
+    assert.equal(summary.refused, 0);
+    assert.equal(summarize(rows, 'session', now, 's2').refused, 1);
+  });
+
+  it('warns and stops each conversation against its own spend', () => {
+    const rows = [usage(now - 3, 40, s1), usage(now - 2, 10, s2), usage(now - 1, 9.99, s2)];
+    const verdict = (session: string) => evaluate(summarize(rows, 'session', now, session), perConversation, now);
+    assert.equal(verdict('s1').warnLevel, 0.8);
+    assert.equal(verdict('s2').warnLevel, undefined);
+    const over = [...rows, usage(now, 10, s1)];
+    assert.equal(evaluate(summarize(over, 'session', now, 's1'), perConversation, now).stop, true);
+    assert.equal(evaluate(summarize(over, 'session', now, 's2'), perConversation, now).stop, false);
+  });
+
+  it('applies an override only to the conversation it was made in', () => {
+    const until = new Date(now + 30 * 60_000).toISOString();
+    const rows = [
+      usage(now - 3, 60, s1), usage(now - 2, 60, s2),
+      control(now - 1, { kind: 'override', until, minutes: 30, window: 'session', session: 's1' } as Partial<LedgerRow>),
+    ];
+    assert.equal(evaluate(summarize(rows, 'session', now, 's1'), perConversation, now).stop, false);
+    assert.equal(evaluate(summarize(rows, 'session', now, 's2'), perConversation, now).stop, true);
+  });
+
+  it('restarts only its own count on /budget reset', () => {
+    const rows = [
+      usage(now - 4, 40, s1), usage(now - 3, 30, s2),
+      control(now - 2, { kind: 'reset', window: 'session', session: 's1' } as Partial<LedgerRow>),
+      usage(now - 1, 1, s1),
+    ];
+    const summary = summarize(rows, 'session', now, 's1');
+    assert.equal(summary.spentUsd, 1);
+    assert.equal(summary.start, now - 2);
+    assert.equal(summarize(rows, 'session', now, 's2').spentUsd, 30);
+  });
+
+  it('keeps conversation overrides and resets out of calendar windows, but honours 0.1.x rows there', () => {
+    const until = new Date(now + 30 * 60_000).toISOString();
+    const conversationRows = [
+      usage(now - 3, 60, s1),
+      control(now - 2, { kind: 'override', until, minutes: 30, window: 'session', session: 's1' } as Partial<LedgerRow>),
+      control(now - 1, { kind: 'reset', window: 'session', session: 's1' } as Partial<LedgerRow>),
+    ];
+    const day = summarize(conversationRows, 'day', now);
+    assert.equal(day.spentUsd, 60);
+    assert.equal(day.overrideUntil, undefined);
+    const legacy = [usage(now - 3, 60, s1), control(now - 2, { kind: 'override', until, minutes: 30, session: 's1' } as Partial<LedgerRow>)];
+    assert.equal(summarize(legacy, 'day', now).overrideUntil, Date.parse(until));
+  });
+
+  it('announces thresholds once per conversation', () => {
+    const announcer = new Announcer();
+    const rows = [usage(now - 2, 41, s1), usage(now - 1, 42, s2)];
+    const next = (session: string) => {
+      const summary = summarize(rows, 'session', now, session);
+      return announcer.next(summary, evaluate(summary, perConversation, now), session);
+    };
+    assert.equal(next('s1'), 0.8);
+    assert.equal(next('s1'), undefined);
+    assert.equal(next('s2'), 0.8);
+  });
+
+  it('words warnings and stops for a conversation', () => {
+    const summary = summarize([usage(now - 1, 41.1, s1)], 'session', now, 's1');
+    assert.equal(warningText(summary, evaluate(summary, perConversation, now), perConversation), '82% of $50.00 conversation limit used ($41.10)');
+    const text = stopText(summarize([usage(now - 1, 50.12, s1)], 'session', now, 's1'), perConversation);
+    assert.match(text, /^stopped: \$50\.12 of \$50\.00 conversation Bedrock budget used; this conversation stays stopped\./);
+    assert.match(text, /Start a new conversation, run \/budget override <minutes> in this one/);
   });
 });
 
