@@ -71,8 +71,12 @@ function setup(budget: Partial<MeteringConfig['budget']> = {}, meter: Partial<Me
   return { runtime, agent, session, clock, stderr, errors, injected, ledgerRows, records, addAgent, agents };
 }
 
-function request(extra: Partial<GenerateOptions> = {}): GenerateOptions {
-  return { provider: 'amazon-bedrock', model: 'global.moonshotai.kimi-k3', messages: [], sessionId: SessionId('session-test'), ...extra };
+// dsh 0.2.2 types `purpose` from LlmRequestPurposeMap, which the title, compaction and auto-review
+// packages fill in by augmentation. They are not dev dependencies, so the tests pass purposes as strings.
+type RequestFields = Partial<Omit<GenerateOptions, 'purpose'>> & { purpose?: string };
+
+function request(extra: RequestFields = {}): GenerateOptions {
+  return { provider: 'amazon-bedrock', model: 'global.moonshotai.kimi-k3', messages: [], sessionId: SessionId('session-test'), ...extra } as GenerateOptions;
 }
 
 async function* adapter(chunks: StreamChunk[], failAfter = false): AsyncIterable<StreamChunk> {
@@ -250,9 +254,9 @@ describe('/budget', () => {
 });
 
 describe('conversation window', () => {
-  const spend = (runtime: MeteringRuntime, sessionId: string, purpose?: GenerateOptions['purpose']) =>
+  const spend = (runtime: MeteringRuntime, sessionId: string, purpose?: string) =>
     drain(streamListener(runtime)(request({ sessionId: SessionId(sessionId), ...purpose === undefined ? {} : { purpose } }), () => adapter([usageChunk(10_000, 1000), done])));
-  const refusedFor = (runtime: MeteringRuntime, options: Partial<GenerateOptions>) => {
+  const refusedFor = (runtime: MeteringRuntime, options: RequestFields) => {
     try {
       streamListener(runtime)(request(options), () => adapter([done]));
       return false;
